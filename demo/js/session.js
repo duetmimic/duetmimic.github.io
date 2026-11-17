@@ -53,8 +53,15 @@
 // holds the last drawable pose instead. Then it resets. Events, in order:
 // 'fall' {failure, siteError, physics}, then 'reset' {reason: 'fall'}.
 //
+// Dragging (setPerturb / clearPerturb, DragSpring): the visitor grabs a point
+// of a rendered body part and pulls it toward a target point with a damped
+// spring, applied at every physics tick, also while a fall plays out. A reset
+// ends the drag with 'perturb-end' {reason: 'reset' | 'fall-reset'} before
+// the 'reset' event; an invalid request ends it with {reason: 'error'}.
+//
 // Events (on(type, fn); '*' receives all): fall, reset {reason: 'fall'|'user'},
-// level {level, name, label}, pause {paused}, backend {backend, fallback}.
+// level {level, name, label}, pause {paused}, backend {backend, fallback},
+// perturb-end {reason, message, geom, body, id}.
 // Every event also carries {type, time (sim seconds since the reset), steps}.
 
 import { fetchBytes, loadContainer, loadJSON } from './lib/container.js';
@@ -258,6 +265,278 @@ export function speedText(command, ui, level) {
 export const backendLabel = (backend) => (backend === 'webgpu' ? 'WebGPU' : 'CPU');
 
 // ---------------------------------------------------------------------------
+// DragSpring: pull a body part with the mouse (DemoSession.setPerturb). Our
+// own take on the MuJoCo viewer's perturbation (engine_vis_interact.c of
+// MuJoCo 3.11: mjv_initPerturb, mjv_applyPerturbForce): at every physics tick
+// a damped spring pulls the grabbed point p, fixed in a rendered geom, toward
+// the target point the visitor drags it to (world, z up):
+//   F = k m (target - p) - 2 zeta sqrt(k) m (v_p - v_root),  |F| capped,
+// applied at p: the geom's body gets F in xfrc_applied, with the torque
+// (p - xipos) x F about its center of mass. As in the viewer, k is the model's
+// vis.map.stiffness (100 1/s^2) and m is mjv_initPerturb's localmass, the
+// effective mass at p when the grab starts: 3 / trace(J M^-1 J^T), J the
+// point's translational Jacobian (it matches the native mjv_initPerturb to 6
+// digits). Here m is about 0.9-1.3 kg at a hand, 4 kg at a forearm or upper
+// arm, 10 kg at the head, 25 kg at the pelvis and 33 kg at the chest.
+//
+// Tuned in closed loop for the demo (DemoSession on WebGPU, 2026-11-16: a
+// sideways pull ramped in over 0.1 s, held 1 s, released; a fall is the
+// session's failure check). The departures from the viewer, in DRAG:
+// - maxMass. With the viewer's m the trunk spring is 2500-3300 N/m: 0.35 m on
+//   the standing pelvis peaked at 660 N and it fell; capped at 400 N it
+//   recovered standing, but both 0.35 m pulls while walking fell. m counts at
+//   most 3 kg, so every part heavier than that (forearm, upper arm, head,
+//   legs, trunk) is pulled with 300 N/m and the force grows over the whole
+//   drag. Standing, 0.35 m on the pelvis, chest or head (90-105 N) stumbles
+//   and recovers, 0.6 m on the pelvis recovered once in two, 0.8-1 m (225-300
+//   N) knocks it over. Walking at 1 m/s, 0.35 m on the pelvis recovered in 7
+//   of 8 trials (4 gait phases, both sides), 0.6 m fell. Lighter parts keep
+//   the viewer's spring: 0.4 m on a hand moves it 0.2 m (22 N).
+// - dampFrame 'root'. The viewer damps the point's absolute velocity, which
+//   brakes a walking body: held 0.1 m off a walking pelvis (the target moving
+//   along), the pull peaked at 85 N, against 38 N with the damper acting on
+//   the point's velocity relative to the walker's root, the point the camera
+//   follows. zeta = 1, critical (the viewer's sqrt(k) m is 0.5).
+// - maxAccel. A wild drag on a hand (3 m) pulled with 240 N, flung it at
+//   3.6 m/s and toppled the walker; |F| <= 50 m/s^2 times the effective mass
+//   holds a hand at about 45 N (1.5 m/s, no fall).
+// - maxForce. Whatever the part, |F| stays at most 400 N, about half the
+//   walker's weight: a 5 m drag on the pelvis stays finite and simply falls.
+// ---------------------------------------------------------------------------
+export const DRAG = Object.freeze({
+  stiffness: null, // k (1/s^2); null: the model's vis.map.stiffness (100, as the viewer)
+  damping: 1, // zeta, the damping ratio of the point on its spring
+  dampFrame: 'root', // 'root': damp v_p - v_root; 'world': damp v_p (the viewer)
+  maxMass: 3, // kg: the most m counts for, so k m <= 300 N/m
+  maxAccel: 50, // m/s^2: |F| <= maxAccel * the effective mass
+  maxForce: 400, // N: |F| <= maxForce
+});
+
+// Margin (m) by which a grabbed point may lie outside its geom's bounding
+// sphere (render meshes are decimated copies of the physics geoms).
+const GRAB_MARGIN = 0.05;
+// Targets farther than this from the origin on any axis (m) are rejected.
+const TARGET_LIMIT = 1e4;
+
+const isVec3 = (x) => x != null && typeof x === 'object' && x.length === 3
+  && Number.isFinite(x[0]) && Number.isFinite(x[1]) && Number.isFinite(x[2]);
+
+export class DragSpring {
+  // geomIds: the pickable geoms (demo.visual.geom_ids, the rendered robot
+  // geoms); geoms of static bodies are never pickable. config: overrides of
+  // DRAG, read when a grab starts.
+  constructor({ mujoco, model, data, geomIds, config = null }) {
+    this.mujoco = mujoco;
+    this.model = model;
+    this.data = data;
+    this.config = { ...DRAG, ...(config || {}) };
+    this.ngeom = model.ngeom;
+    this.geomBody = Int32Array.from(model.geom_bodyid);
+    this.geomRadius = Float64Array.from(model.geom_rbound);
+    this.bodyRoot = Int32Array.from(model.body_rootid);
+    const weld = model.body_weldid;
+    this.pickable = new Uint8Array(model.ngeom);
+    for (const g of geomIds || []) {
+      if (Number.isInteger(g) && g >= 0 && g < model.ngeom && weld[this.geomBody[g]] !== 0) this.pickable[g] = 1;
+    }
+    this.modelStiffness = model.vis.map.stiffness;
+    // Scratch for the effective mass, allocated once: output arguments must
+    // live in the wasm heap (DoubleBuffer), a plain typed array is not one.
+    this.jac = new mujoco.DoubleBuffer(3 * model.nv);
+    this.jacM2 = new mujoco.DoubleBuffer(3 * model.nv);
+    this.sqrtInvD = new Float64Array(model.nv);
+    this.point = new Float64Array(3); // p, world
+    this.local = new Float64Array(3); // p, geom frame
+    this.target = new Float64Array(3);
+    this.active = false;
+    this.geom = -1;
+    this.body = -1;
+    this.root = 0; // the body's tree root (the walker's free-joint body)
+    this.id = null;
+    this.effective = 0; // effective mass at p (kg)
+    this.km = 0; // k m (N/m)
+    this.cm = 0; // 2 zeta sqrt(k) m (N s/m)
+    this.limit = 0; // |F| cap of this grab (N)
+    this.relative = true; // damp relative to the root
+    this.force = 0; // |F| of the latest tick (N)
+    this.stretch = 0; // |target - p| of the latest tick (m)
+    this.peak = 0; // largest |F| since the grab started (N)
+    this.ended = null; // {geom, local, id} of the grab the session ended itself
+    this.hook = (model_, data_, tick, v) => this.apply(v); // SimCore's disturb
+  }
+
+  // Why spec is no valid drag request, or null.
+  problem(spec) {
+    if (!spec || typeof spec !== 'object') return 'perturb: expected {geom, local, target}';
+    const { geom, local, target } = spec;
+    if (!Number.isInteger(geom) || geom < 0 || geom >= this.ngeom || !this.pickable[geom]) {
+      return `perturb: geom ${String(geom)} is not a rendered robot geom`;
+    }
+    if (!isVec3(local)) return 'perturb: local must be three finite numbers';
+    if (Math.hypot(local[0], local[1], local[2]) > this.geomRadius[geom] + GRAB_MARGIN) {
+      return `perturb: local point lies outside geom ${geom}`;
+    }
+    if (!isVec3(target) || Math.max(Math.abs(target[0]), Math.abs(target[1]), Math.abs(target[2])) > TARGET_LIMIT) {
+      return 'perturb: target must be three finite numbers (world, m)';
+    }
+    return null;
+  }
+
+  // Start a drag, or move the target of the current one (same geom, local and
+  // id). spec must pass problem(); v: SimCore's views. Returns 'start',
+  // 'update', or 'stale': an update for the grab the session ended itself,
+  // ignored until a release (end()) or another grab.
+  set(spec, v) {
+    const { geom, local, target } = spec;
+    const id = typeof spec.id === 'number' || typeof spec.id === 'string' ? spec.id : null;
+    const l = this.local;
+    let result = 'update';
+    if (!this.active || geom !== this.geom || id !== this.id
+        || local[0] !== l[0] || local[1] !== l[1] || local[2] !== l[2]) {
+      const e = this.ended;
+      if (!this.active && e && geom === e.geom && id === e.id
+          && local[0] === e.local[0] && local[1] === e.local[1] && local[2] === e.local[2]) return 'stale';
+      this._grab(geom, local, id, v);
+      result = 'start';
+    }
+    this.target[0] = target[0];
+    this.target[1] = target[1];
+    this.target[2] = target[2];
+    return result;
+  }
+
+  _grab(geom, local, id, v) {
+    const c = this.config;
+    this.geom = geom;
+    this.body = this.geomBody[geom];
+    this.root = this.bodyRoot[this.body];
+    this.id = id;
+    this.local[0] = local[0];
+    this.local[1] = local[1];
+    this.local[2] = local[2];
+    const k = c.stiffness ?? this.modelStiffness;
+    const effective = this.effectiveMass(this.body, this._worldPoint(v, this.point));
+    const m = Math.min(effective, c.maxMass);
+    this.effective = effective;
+    this.km = k * m;
+    this.cm = 2 * c.damping * Math.sqrt(k) * m;
+    this.limit = Math.min(c.maxForce, c.maxAccel * effective);
+    this.relative = c.dampFrame !== 'world';
+    this.active = true;
+    this.ended = null;
+    this.force = 0;
+    this.stretch = 0;
+    this.peak = 0;
+  }
+
+  // mjv_initPerturb's localmass at a world point of `body`, from the current
+  // Jacobian and factorized mass matrix (valid after mj_forward / mj_step).
+  effectiveMass(body, point) {
+    const { mujoco, model, data } = this;
+    mujoco.mj_jac(model, data, this.jac, null, point, body);
+    const invD = data.qLDiagInv, s = this.sqrtInvD;
+    for (let i = 0; i < s.length; i++) s[i] = Math.sqrt(invD[i]);
+    mujoco.mj_solveM2(model, data, this.jacM2, this.jac.GetView(), s);
+    const x = this.jacM2.GetView();
+    let invmass = 0;
+    for (let i = 0; i < x.length; i++) invmass += x[i] * x[i];
+    return invmass === 0 ? 1 : 3 / Math.max(invmass, 1e-15); // mjMINVAL
+  }
+
+  // The grabbed point in the world: geom_xpos + geom_xmat (row-major) . local.
+  _worldPoint(v, out) {
+    const gp = v.geom_xpos, gm = v.geom_xmat, l = this.local;
+    const o = 3 * this.geom, m = 9 * this.geom;
+    out[0] = gp[o] + gm[m] * l[0] + gm[m + 1] * l[1] + gm[m + 2] * l[2];
+    out[1] = gp[o + 1] + gm[m + 3] * l[0] + gm[m + 4] * l[1] + gm[m + 5] * l[2];
+    out[2] = gp[o + 2] + gm[m + 6] * l[0] + gm[m + 7] * l[1] + gm[m + 8] * l[2];
+    return out;
+  }
+
+  // End the drag. byItself: the session ended it (a reset, an error), so the
+  // updates for it still on their way are ignored (set() -> 'stale').
+  end(byItself = false) {
+    this.ended = byItself && this.active ? { geom: this.geom, local: Array.from(this.local), id: this.id } : null;
+    this.active = false;
+    this.force = 0;
+    this.stretch = 0;
+  }
+
+  // SimCore's disturbance hook, before every mj_step: add the spring's wrench
+  // to v.xfrc_applied. Reads the kinematics mj_step left. Allocation-free.
+  apply(v) {
+    if (!this.active) return;
+    const p = this._worldPoint(v, this.point), t = this.target;
+    const px = p[0], py = p[1], pz = p[2];
+    // The velocity of p: the body's cvel ([angular, linear] at its tree
+    // root's subtree COM) moved to p, as mj_objectVelocity does.
+    const cv = v.cvel, com = v.subtree_com, c = 6 * this.body, r = 3 * this.root;
+    const wx = cv[c], wy = cv[c + 1], wz = cv[c + 2];
+    const dx = px - com[r], dy = py - com[r + 1], dz = pz - com[r + 2];
+    let vx = cv[c + 3] + wy * dz - wz * dy;
+    let vy = cv[c + 4] + wz * dx - wx * dz;
+    let vz = cv[c + 5] + wx * dy - wy * dx;
+    if (this.relative) { // minus the velocity of the root body's origin
+      const q = 6 * this.root, xp = v.xpos;
+      const sx = xp[r] - com[r], sy = xp[r + 1] - com[r + 1], sz = xp[r + 2] - com[r + 2];
+      const ux = cv[q], uy = cv[q + 1], uz = cv[q + 2];
+      vx -= cv[q + 3] + uy * sz - uz * sy;
+      vy -= cv[q + 4] + uz * sx - ux * sz;
+      vz -= cv[q + 5] + ux * sy - uy * sx;
+    }
+    const ex = t[0] - px, ey = t[1] - py, ez = t[2] - pz;
+    let fx = this.km * ex - this.cm * vx;
+    let fy = this.km * ey - this.cm * vy;
+    let fz = this.km * ez - this.cm * vz;
+    let f = Math.sqrt(fx * fx + fy * fy + fz * fz);
+    if (!Number.isFinite(f)) { // a non-finite state: the fall handling takes over
+      this.force = 0;
+      return;
+    }
+    if (f > this.limit) {
+      const s = this.limit / f;
+      fx *= s; fy *= s; fz *= s;
+      f = this.limit;
+    }
+    // F at p: force, and torque about the body's center of mass.
+    const xi = v.xipos, b = 3 * this.body;
+    const ax = px - xi[b], ay = py - xi[b + 1], az = pz - xi[b + 2];
+    const xf = v.xfrc_applied, w = 6 * this.body;
+    xf[w] += fx;
+    xf[w + 1] += fy;
+    xf[w + 2] += fz;
+    xf[w + 3] += ay * fz - az * fy;
+    xf[w + 4] += az * fx - ax * fz;
+    xf[w + 5] += ax * fy - ay * fx;
+    this.force = f;
+    if (f > this.peak) this.peak = f;
+    this.stretch = Math.sqrt(ex * ex + ey * ey + ez * ez);
+  }
+
+  // For status(): {active, geom, body, id, force, maxForce, stretch}.
+  status() {
+    const on = this.active;
+    return {
+      active: on,
+      geom: on ? this.geom : null,
+      body: on ? this.body : null,
+      id: on ? this.id : null,
+      force: this.force,
+      maxForce: on ? this.limit : this.config.maxForce,
+      stretch: this.stretch,
+    };
+  }
+
+  dispose() {
+    this.active = false;
+    for (const buffer of [this.jac, this.jacM2]) {
+      try { if (buffer) buffer.delete(); } catch { /* already gone */ }
+    }
+    this.jac = this.jacM2 = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // DemoSession
 // ---------------------------------------------------------------------------
 export class DemoSession {
@@ -361,10 +640,10 @@ export class DemoSession {
 
   // Build from loaded parts (create() does this). options: paused (false),
   // fallSeconds (1.0), clock, maxLag (0.25 s), rtfWindow (2 s), shaping
-  // (overrides of SHAPING), gpu (kept referenced: Dawn for Node hangs or
-  // aborts once its GPU object is collected).
+  // (overrides of SHAPING), drag (overrides of DRAG), gpu (kept referenced:
+  // Dawn for Node hangs or aborts once its GPU object is collected).
   constructor({ demo, mujoco, model, data, reference, policies, clock = defaultClock, gpu = null,
-    paused = false, fallSeconds = 1.0, maxLag = 0.25, rtfWindow = 2, shaping = null }) {
+    paused = false, fallSeconds = 1.0, maxLag = 0.25, rtfWindow = 2, shaping = null, drag = null }) {
     this.demo = demo;
     this.ui = demo.ui;
     this.mujoco = mujoco;
@@ -374,6 +653,8 @@ export class DemoSession {
     this.gpu = gpu;
     this.clock = clock;
     this.core = new SimCore({ mujoco, model, data, cfg: demo, reference, policies });
+    this.drag = new DragSpring({ mujoco, model, data, geomIds: demo.visual.geom_ids, config: drag });
+    this.core.disturb = this.drag.hook;
     this.shaper = new CommandShaper(this.core, demo.sim.policy_dt, shaping);
     this.shaped = null; // the last step's shaping decision
     this.extractor = new FrameExtractor(mujoco, model, demo.visual);
@@ -446,8 +727,42 @@ export class DemoSession {
     this._emit('pause', { paused });
   }
 
+  // Drag a body part: start a drag, or move the target of the current one.
+  // spec {geom, local, target, id?}: geom a rendered robot geom
+  // (demo.visual.geom_ids), local the grabbed point in that geom's frame
+  // (world = geom_xpos + geom_xmat . local), target the world point it is
+  // pulled toward, id optional (echoed in status and perturb-end). Returns
+  // 'start', 'update', 'stale' (an update for a drag the session ended itself,
+  // e.g. at a reset: ignored) or 'invalid' (the drag, if any, ends with
+  // 'perturb-end' {reason: 'error', message}).
+  setPerturb(spec) {
+    const problem = this.drag.problem(spec);
+    if (problem) {
+      this.clearPerturb('error', problem);
+      return 'invalid';
+    }
+    return this.drag.set(spec, this.core.views());
+  }
+
+  // End the drag. reason 'release' (or none): the visitor let go, no event.
+  // Any other reason ('reset', 'fall-reset', 'error') means the session ended
+  // it on its own and emits 'perturb-end' {reason, message, geom, body, id};
+  // 'error' does even without a drag, so the page drops its drag either way.
+  // Returns whether a drag was active.
+  clearPerturb(reason = 'release', message = null) {
+    const drag = this.drag;
+    const was = drag.active;
+    const { geom, body, id } = drag.status();
+    const own = reason !== 'release' && reason !== null;
+    drag.end(own);
+    if (own && (was || reason === 'error')) this._emit('perturb-end', { reason, message, geom, body, id });
+    return was;
+  }
+
   // Back to the idle start pose ('user': R / the Reset button; 'fall': after a fall).
+  // A drag ends first ('perturb-end' {reason: 'reset' | 'fall-reset'}).
   reset(reason = 'user') {
+    this.clearPerturb(reason === 'fall' ? 'fall-reset' : 'reset');
     this.core.reset();
     this.fall = null;
     this.drawable = true;
@@ -516,10 +831,13 @@ export class DemoSession {
   _fallStep() {
     const fall = this.fall;
     if (fall.physics) {
-      const { mujoco, model, data } = this;
+      const { mujoco, model, data, core } = this;
       for (let i = 0; i < this.decimation; i++) {
-        data.ctrl.fill(0); // muscles relax, the OSL motors go limp
+        const v = core.views();
+        v.ctrl.fill(0); // muscles relax, the OSL motors go limp
+        core.applyDisturbances(v); // a drag keeps pulling the falling body
         mujoco.mj_step(model, data);
+        core.tick += 1;
       }
       if (!this._stateFinite()) {
         fall.physics = false;
@@ -622,6 +940,9 @@ export class DemoSession {
       siteError: info.siteError,
       pose: this.pose(),
       timing: { ...this.timing },
+      // The drag: {active, geom, body, id, force (N, the latest tick's |F|),
+      // maxForce (N), stretch (m, |target - grabbed point|)}.
+      perturb: this.drag.status(),
     };
   }
 
@@ -648,6 +969,8 @@ export class DemoSession {
   }
 
   dispose() {
+    this.core.disturb = null;
+    this.drag.dispose();
     for (const policy of Object.values(this.policies)) {
       try { policy.dispose(); } catch { /* ignore */ }
     }

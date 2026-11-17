@@ -10,12 +10,24 @@
 //      command history (PreviousCommandPolicy) for control index k;
 //   2. both policies run; their means map to ctrl = clip(a * scale + offset,
 //      low, high) onto the actuator command bus, before tick 0;
-//   3. `decimation` ticks: the delay line moves the bus into data.ctrl, mj_step;
+//   3. `decimation` ticks: the delay line moves the bus into data.ctrl,
+//      data.xfrc_applied is cleared and the disturbance hook adds its wrenches
+//      (applyDisturbances), mj_step;
 //   4. the training failure check: mean distance of the 16 pelvis-relative
 //      tracked bodies (xpos as mj_step left them) from reference(1) > 0.5 m;
 //   5. mj_forward, consume the latched twist request (switch / rebase), advance
 //      the reference, build both observations for the next step.
 // After a failure step() does nothing and returns the failed info: reset().
+//
+// Disturbances: `core.disturb`, if set, is called before every physics tick as
+// disturb(model, data, tick, views) on a cleared data.xfrc_applied, as
+// osl_deploy's Simulation.step calls its disturbances (pushes, the viewer's
+// mouse force). It adds world-frame wrenches (force, then torque about the
+// body's xipos) to views.xfrc_applied and must not allocate. The kinematics it
+// reads (xpos, xipos, geom_xpos, cvel, ...) are those mj_step left, i.e. of the
+// tick before, as in MuJoCo's own viewer. Code that steps the physics outside
+// step() (the session's relaxed fall) calls applyDisturbances() before each
+// mj_step too.
 //
 // No DOM: runs in a module Worker and in Node.
 
@@ -29,6 +41,7 @@ const now = typeof performance !== 'undefined' ? () => performance.now() : () =>
 const VIEWS = [
   'qpos', 'qvel', 'act', 'ctrl', 'actuator_length', 'actuator_velocity', 'actuator_force',
   'sensordata', 'xpos', 'xmat', 'cvel', 'subtree_com',
+  'xipos', 'geom_xpos', 'geom_xmat', 'xfrc_applied', // disturbances
 ];
 
 function finite(a) {
@@ -94,6 +107,8 @@ export class SimCore {
     this.siteTarget = new Float64Array(3 * this.human.sites);
     this._root = { pos: new Float64Array(3), quat: new Float64Array(4), qvel: new Float64Array(6) };
     this.policies = policies || null;
+    // Optional per-tick disturbance hook (see the header); null: none.
+    this.disturb = null;
     this.epoch = 0;
     this.v = null;
     this._inflight = null;
@@ -112,7 +127,16 @@ export class SimCore {
 
   get time() { return this.data.time; }
 
+  // Right before an mj_step: clear data.xfrc_applied, then let the disturbance
+  // hook add its wrenches. Allocation-free.
+  applyDisturbances(v = this.views()) {
+    v.xfrc_applied.fill(0);
+    const disturb = this.disturb;
+    if (disturb) disturb(this.model, this.data, this.tick, v);
+  }
+
   // Start over: idle clip, frame 0, standing still at the reference pose.
+  // (mj_resetData also clears xfrc_applied.)
   reset() {
     const { mujoco, model, data, sim } = this;
     this.epoch += 1;
@@ -196,6 +220,7 @@ export class SimCore {
     if (failure === null) {
       for (let substep = 0; substep < sim.decimation; substep++) {
         this.delay.write(v.ctrl);
+        this.applyDisturbances(v);
         mujoco.mj_step(model, data);
         this.tick += 1;
         v = this.views();

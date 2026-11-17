@@ -6,16 +6,42 @@
 //   const view = new DemoRenderer(hostElement, demo.visual, visualContainer, options);
 //   view.setFrame(frame);           // render/frame.js output, at any rate
 //   view.tick();                    // once per requestAnimationFrame: draws only when something changed
+//                                   // (= view.update(dt?) then view.drawIfChanged())
 //   view.render();                  // update and always draw (or render(dt), seconds)
 //   view.setCameraMode('follow');   // 'follow' | 'chase' | 'free'
 //   view.resetView();               // put the camera back on the default view
 //   view.dispose();
+//
+// Pulling a body part (app.js drives it; the spring itself runs in the worker):
+//   view.pick(clientX, clientY, slop?)        // {geom, body, local, point, distance} | null
+//   view.dragTarget(clientX, clientY, grab)   // [x, y, z]: where the pull points now
+//   view.setPerturb({geom, local, target, force?, maxForce?} | null)  // draw the pull, light the body
+//   view.setControlsEnabled(false)            // no orbiting during a drag
+//   view.holdCamera(true)                     // nor following: a held pull stays put
 //
 // visualContainer is loadContainer(visual.bin.gz) ({meta, arrays}) or its arrays.
 // World coordinates are MuJoCo's (z up, metres); the camera's up is +z.
 // Camera modes: 'follow' keeps the user's orbit and zoom and translates with
 // the pelvis (smoothed); 'chase' also swings the camera behind the walker as it
 // turns; 'free' stops following and enables panning.
+//
+// Picking: pick() casts the ray under the cursor at the pose on screen (the
+// interpolated one). Bones and prosthesis parts are hit on their triangles
+// (split into runs of PICK_CHUNK triangles with a box each, so a ray tests a
+// few hundred triangles, not the 25k of the OSL knee). Muscles count too, as
+// their drawn capsules widened by PICK_MUSCLE_PX: a muscle hit grabs the
+// nearest bone at that point, unless the ray meets a bone just behind it
+// (within PICK_MUSCLE_DEPTH). `local` is the grabbed point in the geom's
+// frame, MuJoCo's: world = geom_xpos + geom_xmat · local, as the render meshes
+// are stored. dragTarget() meets the cursor ray with the plane through the
+// grabbed point's current position, square to the view direction, so the
+// target stays under the cursor (and at the grabbed point's depth). During a
+// drag the camera holds still (holdCamera): following the pulled walker, it
+// would carry the target along, and a pull held still would never let up (a
+// 160 px pull held for 1.5 s dragged the walker 1.2 m and felled it). The pull is
+// an SVG overlay over the canvas (no depth test, widths in CSS px): an
+// orange line from the grabbed point to the target, with a dot at each end,
+// wider the harder the worker reports it pulls; the grabbed body glows.
 //
 // Frames and interpolation. A frame without a time is shown as it is at the
 // next update. A frame with frame.time (simulated seconds, increasing) and
@@ -59,7 +85,23 @@ const DEFAULTS = {
   exposure: 1.0,
   preserveDrawingBuffer: false,
   controls: true,
+  // The pull overlay (sRGB hex): line, its halo and the dot on the body; the
+  // line widens from width[0] to width[1] CSS px as the force reaches full
+  // (setPerturb's maxForce, else forceRef newtons). Then the grabbed body's glow.
+  pull: { line: '#c2410c', halo: '#ffffff', grab: '#f26a1b', width: [2.25, 4.5], forceRef: 400 },
+  glow: { color: '#f26a1b', intensity: 0.35 },
 };
+
+// Picking (see the header).
+const PICK_CHUNK = 128;        // triangles per box
+const PICK_MUSCLE_PX = 3;      // CSS px added to a muscle capsule's radius
+const PICK_MUSCLE_DEPTH = 0.08; // m: a bone this close behind a muscle hit is taken instead
+const PICK_REACH = 0.25;       // m: a muscle hit further than this from every bone grabs nothing
+// m: a muscle hit grabs a geom only within this of the geom's bounding sphere
+// about its origin (the worker refuses points beyond geom_rbound + 5 cm).
+const PICK_RBOUND_MARGIN = 0.03;
+const PULL_FORCE_TAU = 0.15;   // s: smoothing of the reported force (it arrives about 4 times a second)
+const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const CAPSULE_EPS = 1e-3;   // half-height of the capsule's own cylinder (unit radius)
 const LUT_SIZE = 256;
@@ -161,6 +203,140 @@ function primitiveGeometry(type, size) {
     case GEOM_BOX: return new THREE.BoxGeometry(2 * a, 2 * b, 2 * c);
     default: return null;
   }
+}
+
+// A geometry's triangles for picking, in its own (the geom's) frame: positions,
+// indices, and a box [min xyz, max xyz] per run of PICK_CHUNK triangles plus
+// one around them all. null for an empty geometry.
+function pickData(geometry) {
+  const attr = geometry.attributes.position;
+  if (!attr || attr.count === 0 || attr.itemSize !== 3 || attr.isInterleavedBufferAttribute) return null;
+  const p = attr.array;
+  const index = geometry.index ? geometry.index.array : Uint32Array.from({ length: attr.count }, (_, i) => i);
+  const n = Math.floor(index.length / 3);
+  if (n === 0) return null;
+  const chunks = Math.ceil(n / PICK_CHUNK);
+  const boxes = new Float32Array(6 * chunks);
+  const box = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+  let r2 = 0; // squared distance of the farthest vertex from the frame's origin
+  for (let v = 0; v < p.length; v += 3) r2 = Math.max(r2, p[v] * p[v] + p[v + 1] * p[v + 1] + p[v + 2] * p[v + 2]);
+  for (let c = 0; c < chunks; c++) {
+    const b = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+    const end = 3 * Math.min(n, (c + 1) * PICK_CHUNK);
+    for (let k = 3 * c * PICK_CHUNK; k < end; k++) {
+      const v = 3 * index[k];
+      for (let j = 0; j < 3; j++) {
+        const x = p[v + j];
+        if (x < b[j]) b[j] = x;
+        if (x > b[j + 3]) b[j + 3] = x;
+      }
+    }
+    for (let j = 0; j < 3; j++) {
+      boxes[6 * c + j] = b[j];
+      boxes[6 * c + j + 3] = b[j + 3];
+      box[j] = Math.min(box[j], b[j]);
+      box[j + 3] = Math.max(box[j + 3], b[j + 3]);
+    }
+  }
+  return { p, index, n, boxes, box, rbound: Math.sqrt(r2) };
+}
+
+// Entry distance of the ray o + t d (id = 1/d per axis) into box b at offset o6,
+// or Infinity when it misses it or enters beyond `far`.
+function rayBox(ox, oy, oz, ix, iy, iz, b, o6, far) {
+  let t0 = (b[o6] - ox) * ix, t1 = (b[o6 + 3] - ox) * ix;
+  let near = Math.min(t0, t1), exit = Math.max(t0, t1);
+  t0 = (b[o6 + 1] - oy) * iy; t1 = (b[o6 + 4] - oy) * iy;
+  near = Math.max(near, Math.min(t0, t1)); exit = Math.min(exit, Math.max(t0, t1));
+  t0 = (b[o6 + 2] - oz) * iz; t1 = (b[o6 + 5] - oz) * iz;
+  near = Math.max(near, Math.min(t0, t1)); exit = Math.min(exit, Math.max(t0, t1));
+  return exit >= Math.max(near, 0) && near < far ? near : Infinity;
+}
+
+const safeInverse = (d) => 1 / (Math.abs(d) > 1e-12 ? d : (d < 0 ? -1e-12 : 1e-12));
+
+// Nearest hit (t < far) of the ray o + t d on the triangles of pickData(),
+// both faces (Moller-Trumbore), all in the geom frame; far when none.
+function rayMesh(data, ox, oy, oz, dx, dy, dz, ix, iy, iz, far) {
+  const { p, index, n, boxes } = data;
+  let best = far;
+  const chunks = boxes.length / 6;
+  for (let c = 0; c < chunks; c++) {
+    if (rayBox(ox, oy, oz, ix, iy, iz, boxes, 6 * c, best) === Infinity) continue;
+    const end = 3 * Math.min(n, (c + 1) * PICK_CHUNK);
+    for (let k = 3 * c * PICK_CHUNK; k < end; k += 3) {
+      const a = 3 * index[k], b = 3 * index[k + 1], q = 3 * index[k + 2];
+      const ax = p[a], ay = p[a + 1], az = p[a + 2];
+      const e1x = p[b] - ax, e1y = p[b + 1] - ay, e1z = p[b + 2] - az;
+      const e2x = p[q] - ax, e2y = p[q + 1] - ay, e2z = p[q + 2] - az;
+      const hx = dy * e2z - dz * e2y, hy = dz * e2x - dx * e2z, hz = dx * e2y - dy * e2x;
+      const det = e1x * hx + e1y * hy + e1z * hz;
+      if (det === 0) continue;
+      const inv = 1 / det;
+      const sx = ox - ax, sy = oy - ay, sz = oz - az;
+      const u = (sx * hx + sy * hy + sz * hz) * inv;
+      if (u < 0 || u > 1) continue;
+      const rx = sy * e1z - sz * e1y, ry = sz * e1x - sx * e1z, rz = sx * e1y - sy * e1x;
+      const v = (dx * rx + dy * ry + dz * rz) * inv;
+      if (v < 0 || u + v > 1) continue;
+      const t = (e2x * rx + e2y * ry + e2z * rz) * inv;
+      if (t > 1e-6 && t < best) best = t;
+    }
+  }
+  return best;
+}
+
+// Entry distance (t > 0) of the ray o + t d (|d| = 1) into a sphere, or Infinity.
+function raySphere(ox, oy, oz, dx, dy, dz, cx, cy, cz, r) {
+  const px = ox - cx, py = oy - cy, pz = oz - cz;
+  const b = dx * px + dy * py + dz * pz;
+  const h = b * b - (px * px + py * py + pz * pz - r * r);
+  if (h <= 0) return Infinity;
+  const t = -b - Math.sqrt(h);
+  return t > 0 ? t : Infinity;
+}
+
+// Entry distance (t > 0) of the ray o + t d (|d| = 1) into the capsule from a
+// to b of radius r (Quilez, "ray-capsule intersection"), or Infinity.
+function rayCapsule(ox, oy, oz, dx, dy, dz, ax, ay, az, bx, by, bz, r) {
+  const bax = bx - ax, bay = by - ay, baz = bz - az;
+  const oax = ox - ax, oay = oy - ay, oaz = oz - az;
+  const baba = bax * bax + bay * bay + baz * baz;
+  const bard = bax * dx + bay * dy + baz * dz;
+  const baoa = bax * oax + bay * oay + baz * oaz;
+  const a = baba - bard * bard;
+  if (a > 1e-12) {
+    const b = baba * (dx * oax + dy * oay + dz * oaz) - baoa * bard;
+    const c = baba * (oax * oax + oay * oay + oaz * oaz) - baoa * baoa - r * r * baba;
+    const h = b * b - a * c;
+    if (h < 0) return Infinity; // misses the infinite cylinder, so the capsule too
+    const t = (-b - Math.sqrt(h)) / a;
+    const y = baoa + t * bard;
+    if (y > 0 && y < baba) return t > 0 ? t : Infinity; // enters through the side
+  }
+  // Through an end cap (also for a ray along the axis or a zero-length segment).
+  return Math.min(raySphere(ox, oy, oz, dx, dy, dz, ax, ay, az, r), raySphere(ox, oy, oz, dx, dy, dz, bx, by, bz, r));
+}
+
+// The pull overlay: an SVG over the canvas holding a haloed line and two dots.
+function pullOverlay(host, colors) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('class', 'pull-overlay');
+  svg.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible;pointer-events:none;display:none';
+  const make = (tag, attrs) => {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    svg.appendChild(node);
+    return node;
+  };
+  const halo = make('line', { stroke: colors.halo, 'stroke-width': 6, 'stroke-linecap': 'round', 'stroke-opacity': 0.85 });
+  const line = make('line', { stroke: colors.line, 'stroke-width': 2.5, 'stroke-linecap': 'round' });
+  const target = make('circle', { r: 4.5, fill: colors.halo, stroke: colors.line, 'stroke-width': 2.25 });
+  const grab = make('circle', { r: 5.5, fill: colors.grab, stroke: colors.halo, 'stroke-width': 2 });
+  if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+  host.appendChild(svg);
+  return { svg, halo, line, target, grab, shown: false, xy: new Float64Array(4).fill(NaN), width: '' };
 }
 
 export class DemoRenderer {
@@ -334,6 +510,25 @@ export class DemoRenderer {
     this._halfAttr = half;
     this._lut = this._buildLut(mus.colormap || [[0, [0.98, 0.62, 0.58]], [0.3, [0.96, 0.33, 0.31]], [1, [0.8, 0.03, 0.04]]]);
 
+    // Picking and pulling: each drawn geom's body and triangles (shared per
+    // geometry), the muscle capsules as drawn, the pull overlay, the glow.
+    this._geomIds = geomIds;
+    this._geomBody = arrays.geom_body ? Array.from(arrays.geom_body) : geomIds.map(() => -1);
+    this._geomIndex = new Map(geomIds.map((g, i) => [g, i]));
+    const picks = new Map();
+    this._pickData = this.geomMeshes.map((mesh) => {
+      if (!picks.has(mesh.geometry)) picks.set(mesh.geometry, pickData(mesh.geometry));
+      return picks.get(mesh.geometry);
+    });
+    this._segs = new Float32Array(7 * capacity); // per drawn muscle segment: p0, p1, radius
+    this._segCount = 0;
+    this._raycaster = new THREE.Raycaster();
+    this._ndc = new THREE.Vector2();
+    this._overlay = pullOverlay(host, opts.pull);
+    this._pull = null;        // {index, local, target, force, forceRef} while a body part is pulled
+    this._pullForce = 0;      // smoothed force (N) for the line width
+    this._glow = { key: null, meshes: [], materials: new Map() };
+
     // State.
     this._frame = null;       // untimed frame not yet applied
     this._queue = [];         // timed frames of one epoch, oldest first
@@ -344,12 +539,14 @@ export class DemoRenderer {
     this._clamped = 0;        // times the clock ran into the newest frame (none newer had arrived)
     this._hasFrame = false;   // a frame has been applied (the walker is drawn)
     this._mode = 'follow';
+    this._hold = false;       // holdCamera(): no following
     this._snap = true;
     this._root = new THREE.Vector3(0, 0, 0.9);
     this._heading = 0;
     this._smooth = new THREE.Vector3(0, 0, 0.9);
     this._lastTime = 0;
     this._tmp = new THREE.Vector3();
+    this._tmpProject = new THREE.Vector3();
     this._qa = new Float64Array(4);
     this._qb = new Float64Array(4);
     this._redraw = true;      // something changed that the camera state does not show
@@ -422,6 +619,12 @@ export class DemoRenderer {
   // Distance from the camera to its target (m).
   get cameraDistance() { return this.camera.position.distanceTo(this._targetVector()); }
 
+  // Azimuth of the camera seen from its target (deg, CCW from +x, as setView).
+  get cameraAzimuth() {
+    const o = this._tmpProject.copy(this.camera.position).sub(this._targetVector());
+    return THREE.MathUtils.radToDeg(Math.atan2(o.y, o.x));
+  }
+
   // Put the camera on the default view of the walker at the next update: in
   // 'chase' behind the walker at chaseAzimuth, otherwise at demo.visual.camera.
   resetView() { this._snap = true; }
@@ -478,15 +681,138 @@ export class DemoRenderer {
       this._advance(dt);
     }
     this._updateCamera(Math.min(0.1, dt));
+    if (this._pull) {
+      this._pullForce += (this._pull.force - this._pullForce) * (1 - Math.exp(-dt / PULL_FORCE_TAU));
+      this._updatePull();
+    }
   }
 
   // update(dt), then draw if anything visible changed since the last drawing.
   // Returns whether it drew. For requestAnimationFrame loops.
   tick(dt) {
     this.update(dt);
+    return this.drawIfChanged();
+  }
+
+  // Draw if anything visible changed since the last drawing (the second half
+  // of tick(), for a caller with work between the update and the draw).
+  drawIfChanged() {
     if (!this._needsDraw()) return false;
     this._draw();
     return true;
+  }
+
+  // ------------------------------------------------------------- pulling
+  // The robot part under the cursor (client coordinates) as drawn now:
+  // {geom (model geom id), body (its body id), local ([x, y, z] in the geom
+  // frame), point ([x, y, z] world)}, or null for the background, the floor or
+  // an empty canvas. See the header for how muscles count. slop (CSS px): when
+  // the cursor itself misses, the nearest hit on rings of rays up to this far
+  // from it (a fingertip, a thin part), the inner ring first.
+  pick(clientX, clientY, slop = 0) {
+    const hit = this._pickAt(clientX, clientY);
+    if (hit || !(slop > 0)) return hit;
+    for (const radius of [slop / 2, slop]) {
+      let best = null;
+      for (let k = 0; k < 12; k++) {
+        const a = (k * Math.PI) / 6;
+        const h = this._pickAt(clientX + radius * Math.cos(a), clientY + radius * Math.sin(a));
+        if (h && (!best || h.distance < best.distance)) best = h;
+      }
+      if (best) return best;
+    }
+    return null;
+  }
+
+  _pickAt(clientX, clientY) {
+    if (!this._hasFrame || !this.robot.visible) return null;
+    const ray = this._cursorRay(clientX, clientY, true);
+    if (!ray) return null;
+    const bone = this._pickBones(ray);
+    const muscle = this.muscles.visible ? this._pickMuscles(ray) : Infinity;
+    let index = -1, t = Infinity;
+    if (bone.t < Infinity && bone.t <= muscle + PICK_MUSCLE_DEPTH) {
+      index = bone.index;
+      t = bone.t;
+    } else if (muscle < Infinity) {
+      t = muscle;
+      index = this._nearestGeom(ray.origin.x + t * ray.direction.x, ray.origin.y + t * ray.direction.y, ray.origin.z + t * ray.direction.z);
+    }
+    if (index < 0) return null;
+    const o = ray.origin, d = ray.direction;
+    const point = [o.x + t * d.x, o.y + t * d.y, o.z + t * d.z];
+    return { geom: this._geomIds[index], body: this._geomBody[index], local: this._toLocal(index, point), point, distance: t };
+  }
+
+  // Where a pull on grab ({geom, local}) points for the cursor at (clientX,
+  // clientY): the cursor ray met with the plane through the grabbed point as
+  // drawn now, square to the view direction. Call it every animation frame
+  // (after update()) while dragging: the target then stays under the cursor
+  // while the camera moves. [x, y, z] world, or null for an unknown geom.
+  dragTarget(clientX, clientY, grab) {
+    const index = grab ? this._geomIndex.get(grab.geom) : undefined;
+    if (index === undefined) return null;
+    const p = this._toWorld(index, grab.local);
+    const ray = this._cursorRay(clientX, clientY, false);
+    if (!ray) return p;
+    const n = this.camera.getWorldDirection(this._tmp);
+    const o = ray.origin, d = ray.direction;
+    const denom = n.x * d.x + n.y * d.y + n.z * d.z;
+    const t = denom > 1e-6 ? (n.x * (p[0] - o.x) + n.y * (p[1] - o.y) + n.z * (p[2] - o.z)) / denom : NaN;
+    if (!(t > 0)) return p; // the point is behind the camera: no pull
+    return [o.x + t * d.x, o.y + t * d.y, o.z + t * d.z];
+  }
+
+  // Show a pull: a line from the grabbed point (geom + local, moving with the
+  // body) to target (world), wider the nearer force (N, optional) is to
+  // maxForce (N, optional), and the grabbed body aglow. null hides it.
+  setPerturb(pull) {
+    const index = pull ? this._geomIndex.get(pull.geom) : undefined;
+    if (index === undefined) {
+      this._pull = null;
+      this._setGlow(null);
+      this._showOverlay(false);
+      return;
+    }
+    const force = Number.isFinite(pull.force) ? Math.max(0, pull.force) : 0;
+    const forceRef = Number.isFinite(pull.maxForce) && pull.maxForce > 0 ? pull.maxForce : this.options.pull.forceRef;
+    if (!this._pull || this._pull.index !== index) this._pullForce = force;
+    this._pull = { index, local: Array.from(pull.local), target: Array.from(pull.target), force, forceRef };
+    const body = this._geomBody[index];
+    this._setGlow(body >= 0 ? `b${body}` : `g${index}`);
+    this._updatePull();
+  }
+
+  // OrbitControls on or off (off while a body part is dragged).
+  setControlsEnabled(on) {
+    if (this.controls) this.controls.enabled = !!on;
+  }
+
+  // Hold the camera where it is (true) or let it follow the walker again
+  // (false: it glides back, as when leaving 'free'). On during a drag: a
+  // camera that follows the pulled walker would carry the target (under the
+  // cursor) along with it, and a pull held still would never let up.
+  holdCamera(on) {
+    on = !!on;
+    if (on === this._hold) return;
+    this._hold = on;
+    if (!on && this._mode !== 'free') this._smooth.copy(this._targetVector());
+  }
+
+  // A world point ([x, y, z]) on screen as drawn now: [clientX, clientY], or
+  // null behind the camera. For tests and overlays.
+  projectToClient(point) {
+    const canvas = this.renderer.domElement;
+    const rect = canvas.getBoundingClientRect();
+    const xy = this._project(point[0], point[1], point[2], rect.width, rect.height);
+    return xy ? [rect.left + xy[0], rect.top + xy[1]] : null;
+  }
+
+  // The world position of a point given in a drawn geom's frame (default its
+  // origin), as drawn now; null for a geom that is not drawn.
+  geomPoint(geom, local = [0, 0, 0]) {
+    const index = this._geomIndex.get(geom);
+    return index === undefined ? null : this._toWorld(index, local);
   }
 
   // update(dt), then draw.
@@ -640,6 +966,8 @@ export class DemoRenderer {
     }
     const m = this.muscles.instanceMatrix.array;
     const col = this.muscles.instanceColor.array, half = this._halfAttr.array, lut = this._lut;
+    const segs = this._segs;
+    this._segCount = n;
     for (let i = 0; i < n; i++) {
       const o = 8 * i;
       let x0 = sa[o], y0 = sa[o + 1], z0 = sa[o + 2], x1 = sa[o + 3], y1 = sa[o + 4], z1 = sa[o + 5];
@@ -659,6 +987,9 @@ export class DemoRenderer {
       const sign = dz >= 0 ? 1 : -1;
       const e = -1 / (sign + dz), f = dx * dy * e;
       // b1 = (1 + sign dx^2 e, sign f, -sign dx), b2 = (f, sign + dy^2 e, -dy); X = b2, Y = d, Z = b1.
+      const s7 = 7 * i;
+      segs[s7] = x0; segs[s7 + 1] = y0; segs[s7 + 2] = z0;
+      segs[s7 + 3] = x1; segs[s7 + 4] = y1; segs[s7 + 5] = z1; segs[s7 + 6] = r;
       const j = 16 * i;
       m[j] = f * r; m[j + 1] = (sign + dy * dy * e) * r; m[j + 2] = -dy * r; m[j + 3] = 0;
       m[j + 4] = dx * r; m[j + 5] = dy * r; m[j + 6] = dz * r; m[j + 7] = 0;
@@ -707,14 +1038,14 @@ export class DemoRenderer {
       this._snap = false;
     } else if (this._hasFrame) {
       // The smoothed walker position drives the light in every mode and the
-      // camera in 'follow' and 'chase'.
+      // camera in 'follow' and 'chase' (unless held: holdCamera).
       this._smooth.lerp(this._root, 1 - Math.exp(-this.options.followRate * dt));
-      if (this._mode !== 'free') {
+      if (this._mode !== 'free' && !this._hold) {
         const delta = this._tmp.copy(this._smooth).sub(target);
         camera.position.add(delta);
         target.add(delta);
       }
-      if (this._mode === 'chase') {
+      if (this._mode === 'chase' && !this._hold) {
         // Swing behind the walker (azimuth) and up to the chase height
         // (elevation); the distance stays where the user zoomed it.
         const ox = camera.position.x - target.x, oy = camera.position.y - target.y;
@@ -747,11 +1078,190 @@ export class DemoRenderer {
     this.floor.position.set(Math.round(q.x / period) * period, Math.round(q.y / period) * period, 0);
   }
 
+  // ------------------------------------------------------------- picking internals
+  // The camera ray through a client point (the raycaster's own ray: use it at
+  // once). inside: null when the point is off the canvas.
+  _cursorRay(clientX, clientY, inside) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return null;
+    const x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const y = 1 - ((clientY - rect.top) / rect.height) * 2;
+    if (inside && (x < -1 || x > 1 || y < -1 || y > 1)) return null;
+    this.camera.updateMatrixWorld();
+    this._raycaster.setFromCamera(this._ndc.set(x, y), this.camera);
+    return this._raycaster.ray;
+  }
+
+  // Nearest triangle hit over the drawn geoms: {index (into geom_ids), t}.
+  _pickBones(ray) {
+    const o = ray.origin, d = ray.direction;
+    let best = Infinity, bestIndex = -1;
+    for (let i = 0; i < this.geomCount; i++) {
+      const data = this._pickData[i];
+      if (!data) continue;
+      // The ray in the geom frame: R^T (o - pos), R^T d (matrix = [R pos], column-major).
+      const e = this.geomMeshes[i].matrix.elements;
+      const px = o.x - e[12], py = o.y - e[13], pz = o.z - e[14];
+      const ox = e[0] * px + e[1] * py + e[2] * pz, oy = e[4] * px + e[5] * py + e[6] * pz, oz = e[8] * px + e[9] * py + e[10] * pz;
+      const dx = e[0] * d.x + e[1] * d.y + e[2] * d.z, dy = e[4] * d.x + e[5] * d.y + e[6] * d.z, dz = e[8] * d.x + e[9] * d.y + e[10] * d.z;
+      const ix = safeInverse(dx), iy = safeInverse(dy), iz = safeInverse(dz);
+      if (rayBox(ox, oy, oz, ix, iy, iz, data.box, 0, best) === Infinity) continue;
+      const t = rayMesh(data, ox, oy, oz, dx, dy, dz, ix, iy, iz, best);
+      if (t < best) {
+        best = t;
+        bestIndex = i;
+      }
+    }
+    return { index: bestIndex, t: best };
+  }
+
+  // Nearest hit on the muscle capsules as drawn, each widened by PICK_MUSCLE_PX
+  // at its depth: t along the ray, or Infinity.
+  _pickMuscles(ray) {
+    const n = this._segCount;
+    if (!n) return Infinity;
+    const o = ray.origin, d = ray.direction, segs = this._segs;
+    const f = this.camera.getWorldDirection(this._tmp);
+    const height = this.renderer.domElement.clientHeight || 1;
+    const perMetre = (PICK_MUSCLE_PX * 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2)) / height;
+    let best = Infinity;
+    for (let i = 0, s = 0; i < n; i++, s += 7) {
+      const ax = segs[s], ay = segs[s + 1], az = segs[s + 2], bx = segs[s + 3], by = segs[s + 4], bz = segs[s + 5];
+      const depth = (0.5 * (ax + bx) - o.x) * f.x + (0.5 * (ay + by) - o.y) * f.y + (0.5 * (az + bz) - o.z) * f.z;
+      if (depth <= 0) continue;
+      const t = rayCapsule(o.x, o.y, o.z, d.x, d.y, d.z, ax, ay, az, bx, by, bz, segs[s + 6] + perMetre * depth);
+      if (t < best) best = t;
+    }
+    return best;
+  }
+
+  // The drawn geom whose box (in its own frame) is nearest to a world point,
+  // within PICK_REACH, among those whose bounding sphere about their origin
+  // (plus PICK_RBOUND_MARGIN) holds the point; -1 if none.
+  _nearestGeom(x, y, z) {
+    let best = PICK_REACH * PICK_REACH, bestIndex = -1;
+    for (let i = 0; i < this.geomCount; i++) {
+      const data = this._pickData[i];
+      if (!data) continue;
+      const [lx, ly, lz] = this._toLocal(i, [x, y, z]);
+      if (Math.hypot(lx, ly, lz) > data.rbound + PICK_RBOUND_MARGIN) continue;
+      const b = data.box;
+      const dx = Math.max(b[0] - lx, 0, lx - b[3]), dy = Math.max(b[1] - ly, 0, ly - b[4]), dz = Math.max(b[2] - lz, 0, lz - b[5]);
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < best) {
+        best = d2;
+        bestIndex = i;
+      }
+    }
+    return bestIndex;
+  }
+
+  // World point -> the frame of drawn geom i as drawn now, and back.
+  _toLocal(i, p) {
+    const e = this.geomMeshes[i].matrix.elements;
+    const x = p[0] - e[12], y = p[1] - e[13], z = p[2] - e[14];
+    return [e[0] * x + e[1] * y + e[2] * z, e[4] * x + e[5] * y + e[6] * z, e[8] * x + e[9] * y + e[10] * z];
+  }
+
+  _toWorld(i, l) {
+    const e = this.geomMeshes[i].matrix.elements;
+    return [
+      e[12] + e[0] * l[0] + e[4] * l[1] + e[8] * l[2],
+      e[13] + e[1] * l[0] + e[5] * l[1] + e[9] * l[2],
+      e[14] + e[2] * l[0] + e[6] * l[1] + e[10] * l[2],
+    ];
+  }
+
+  // A world point in CSS pixels from the canvas's top-left corner, or null if
+  // it is not in front of the camera.
+  _project(x, y, z, width, height) {
+    const cam = this.camera;
+    cam.updateMatrixWorld();
+    const v = this._tmpProject.set(x, y, z).applyMatrix4(cam.matrixWorldInverse);
+    if (v.z > -cam.near) return null;
+    v.applyMatrix4(cam.projectionMatrix);
+    return [((v.x + 1) / 2) * width, ((1 - v.y) / 2) * height];
+  }
+
+  // Move the pull overlay to the grabbed point (as drawn now) and the target.
+  _updatePull() {
+    const pull = this._pull, ov = this._overlay;
+    if (!pull) {
+      this._showOverlay(false);
+      return;
+    }
+    const canvas = this.renderer.domElement;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const g = this._toWorld(pull.index, pull.local);
+    const a = this._project(g[0], g[1], g[2], w, h);
+    const b = this._project(pull.target[0], pull.target[1], pull.target[2], w, h);
+    if (!a || !b) {
+      this._showOverlay(false);
+      return;
+    }
+    const xy = ov.xy;
+    if (!ov.shown || Math.abs(a[0] - xy[0]) > 0.05 || Math.abs(a[1] - xy[1]) > 0.05 || Math.abs(b[0] - xy[2]) > 0.05 || Math.abs(b[1] - xy[3]) > 0.05) {
+      xy[0] = a[0]; xy[1] = a[1]; xy[2] = b[0]; xy[3] = b[1];
+      const [x1, y1, x2, y2] = [a[0], a[1], b[0], b[1]].map((v) => v.toFixed(1));
+      for (const node of [ov.halo, ov.line]) {
+        node.setAttribute('x1', x1); node.setAttribute('y1', y1);
+        node.setAttribute('x2', x2); node.setAttribute('y2', y2);
+      }
+      ov.grab.setAttribute('cx', x1); ov.grab.setAttribute('cy', y1);
+      ov.target.setAttribute('cx', x2); ov.target.setAttribute('cy', y2);
+    }
+    const [w0, w1] = this.options.pull.width;
+    const width = (w0 + (w1 - w0) * Math.min(1, this._pullForce / pull.forceRef)).toFixed(1);
+    if (width !== ov.width) {
+      ov.width = width;
+      ov.line.setAttribute('stroke-width', width);
+      ov.halo.setAttribute('stroke-width', (Number(width) + 3.5).toFixed(1));
+    }
+    this._showOverlay(true);
+  }
+
+  _showOverlay(on) {
+    const ov = this._overlay;
+    if (ov.shown === on) return;
+    ov.shown = on;
+    ov.svg.style.display = on ? 'block' : 'none';
+  }
+
+  // Light the meshes of one body ('b<body id>') or geom ('g<index>'), or none:
+  // their materials are swapped for glowing copies, then back.
+  _setGlow(key) {
+    const glow = this._glow;
+    if (glow.key === key) return;
+    for (const [mesh, material] of glow.meshes) mesh.material = material;
+    glow.meshes = [];
+    glow.key = key;
+    if (key !== null) {
+      for (let i = 0; i < this.geomCount; i++) {
+        const own = this._geomBody[i] >= 0 ? `b${this._geomBody[i]}` : `g${i}`;
+        if (own !== key) continue;
+        const mesh = this.geomMeshes[i];
+        let lit = glow.materials.get(mesh.material);
+        if (!lit) {
+          lit = mesh.material.clone();
+          lit.emissive.set(this.options.glow.color);
+          lit.emissiveIntensity = this.options.glow.intensity;
+          glow.materials.set(mesh.material, lit);
+        }
+        glow.meshes.push([mesh, mesh.material]);
+        mesh.material = lit;
+      }
+    }
+    this._redraw = true;
+  }
+
   dispose() {
     if (this._observer) this._observer.disconnect();
     this._releaseQueue(0);
     if (this._frame) this._release(this._frame);
     this._frame = null;
+    this._setGlow(null);
+    for (const lit of this._glow.materials.values()) lit.dispose();
+    this._overlay.svg.remove();
     if (this.controls) this.controls.dispose();
     const seen = new Set();
     this.scene.traverse((o) => {

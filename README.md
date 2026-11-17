@@ -11,13 +11,35 @@ repository `duetmimic/duetmimic.github.io` at <https://duetmimic.github.io/>.
   policy (osl_deploy bundle `stage2_R2_model_6898`) in the browser. A human
   policy drives the 339 muscles and an onboard policy drives the Open-Source
   Leg's knee and ankle. You steer it with W/A/S/D, or with the on-screen pad on
-  a touch screen. Physics is the official MuJoCo 3.11.0 WebAssembly build.
+  a touch screen, and you can drag a body part with the mouse or a finger to
+  pull it off balance. Physics is the official MuJoCo 3.11.0 WebAssembly build.
   Rendering is three.js, and inference uses WebGPU where available, otherwise
   the CPU. The demo is deliberately stripped down: it keeps only what the two
   policies need to walk, not the full osl_deploy runtime.
 
 There is no build step. Everything is static HTML, CSS and ES modules.
 `tools/DESIGN.md` documents the layout, asset formats and module contracts.
+
+## Demo controls
+
+- **W / S** walk forward / backward, **A / D** turn left / right; A or D alone
+  turns in place. **1**-**5** pick the speed (**Q** / **E** step it), **Shift**
+  held is top speed. Arrow keys steer too.
+- Walking backward, A/D steer like a car in reverse: **S+A** backs along a path
+  that curves to the walker's left while its body yaws right, and **S+D**
+  mirrors it. The HUD says "Backward, curving left" or "right".
+- **Drag** a body part (left mouse button, or one finger) to pull it. The
+  worker pulls the grabbed point toward the pointer with a damped spring (our
+  own version of MuJoCo's mouse perturbation) until you let go, and the
+  walker has to catch itself. A hard pull knocks it over, and it resets.
+  Dragging the background orbits the camera.
+- **Space** pauses (a drag made while paused pulls once resumed), **R**
+  resets, **C** cycles the camera (behind the walker, fixed angle, free),
+  **H** toggles the help. On a touch screen the pad's arrows hold W/A/S/D and
+  Fast toggles top speed; one thumb can walk while the other pulls.
+
+The demo's help panel (`demo/index.html`) and the landing page's key list
+(`index.html`) say the same in fewer words; keep the three in step.
 
 ## Local preview
 
@@ -67,13 +89,16 @@ somewhere other than Playwright's default folder. All commands run from
 
 - `node --test test/e2e_session.test.mjs`: the demo's simulation side
   (DemoSession) in Node on the real assets: a scripted WASD schedule, the
-  command shaping, a fixed-seed key-masher, falls, cache-busting versions and
-  fail-fast loading. Inference uses WebGPU through Dawn when it finds a hardware
-  adapter; `E2E_BACKEND=cpu|webgpu` forces one, `E2E_MASH_SECONDS` sets the
-  masher's length.
+  command shaping, backward steering (S+A curves to the walker's left), a
+  fixed-seed key-masher, falls, pulling (a sideways pull standing and walking,
+  `xfrc_applied` and the force caps, a pull through a fall, invalid requests),
+  cache-busting versions and fail-fast loading. Inference uses WebGPU through
+  Dawn when it finds a hardware adapter; `E2E_BACKEND=cpu|webgpu` forces one,
+  `E2E_MASH_SECONDS` sets the masher's length.
 - `DUET_BROWSER_TESTS=1 [E2E_GPU=1] [E2E_SHOTS_DIR=<folder>] [E2E_PORT=8741] node --test test/e2e_browser.test.mjs`
-  drives the real demo page in headless Chromium for about a minute. Add
-  `E2E_GPU=1` for a hardware GPU (Chromium flags
+  drives the real demo page in headless Chromium for about a minute, including
+  pulling a body part with the mouse (standalone, paused, embedded) and with a
+  finger. Add `E2E_GPU=1` for a hardware GPU (Chromium flags
   `--use-angle=vulkan --enable-unsafe-webgpu --enable-features=Vulkan`).
 - `DUET_COMPAT_TESTS=1 [COMPAT_ENGINES=chromium,firefox,webkit] [COMPAT_GPU=1] [COMPAT_WEBKIT_LIBS=<dir>] [COMPAT_SHOTS_DIR=<folder>] [COMPAT_PORT=8831] node --test test/compat_browsers.test.mjs`
   runs the project page and the demo in Chromium, Firefox and WebKit, each
@@ -90,7 +115,8 @@ somewhere other than Playwright's default folder. All commands run from
   `tools/test/nn_browser.html` also runs by hand in any browser, for example
   Safari on a Mac, served from the repository root.
 - `DUET_BROWSER_TESTS=1 [RENDER_SHOTS_DIR=<folder>] node --test test/render_shots.test.mjs`:
-  renderer screenshots of fixture poses.
+  renderer screenshots of fixture poses, the camera modes, and picking for the
+  drag (grabbed points checked against MuJoCo's own geom frames).
 - The trace tests in `test/sim.test.mjs` skip until you regenerate their
   ground truth with `python -m duet_export.trace` (git-ignored, 22 MB).
 

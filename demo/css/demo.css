@@ -787,7 +787,7 @@ html[data-phase="failed"] #touch-pad { display: none; }
   #help h2 { margin-bottom: 9px; font-size: 13.5px; }
   .key-grid { grid-template-columns: auto auto auto auto; gap: 6px 12px; }
   .key-grid dd { font-size: 12.5px; padding-right: 8px; }
-  kbd { min-width: 23px; height: 23px; }
+  kbd, .key-grid .pad-key { min-width: 23px; height: 23px; }
   .help-notes { display: none; }
 }
 

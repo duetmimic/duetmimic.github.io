@@ -50,9 +50,13 @@ FRAME_FIELDS = ("root_pos", "root_quat", "root_lin_vel", "root_ang_vel_w", "rpos
 
 # ---------------------------------------------------------------------------
 # WASD design. Twist (vx m/s, vy m/s, wz rad/s), wz > 0 turns left (CCW seen
-# from above). A/D always turn the body left/right, also while walking
-# backward (tank-style), so S+A backs up along a curve whose heading turns left.
-# Opposite keys cancel (W+S: no translation, A+D: no turn).
+# from above). Walking forward or turning in place, A/D turn the body left/
+# right. Walking backward, A/D steer like a car in reverse (user request,
+# 2026-11-16; the first, tank-style table felt flipped): S+A backs up along a
+# path that curves to the walker's LEFT, so the body yaws right (wz < 0); seen
+# from the chase camera behind the walker it comes toward the camera and moves
+# to the left of the screen. Opposite keys cancel (W+S: no translation, A+D:
+# no turn).
 #
 # The values are decimal labels of library clips; ui_section() replaces each by
 # the clip's exact float32 label. The forward grid has +-0.5 rad/s arcs at every
@@ -122,8 +126,8 @@ ACTION_LABELS = {
     "forward_left": "Forward, left",
     "forward_right": "Forward, right",
     "backward": "Backward",
-    "backward_left": "Backward, turning left",
-    "backward_right": "Backward, turning right",
+    "backward_left": "Backward, curving left",
+    "backward_right": "Backward, curving right",
     "turn_left": "Turn left",
     "turn_right": "Turn right",
 }
@@ -137,7 +141,9 @@ def decimal_twist(level, action):
     if direction > 0:
         return (level["forward"], 0.0, turn * level["arc"])
     if direction < 0:
-        return (level["backward"], 0.0, turn * level["back_arc"])
+        # Car in reverse: the path curves toward the key's side, the body yaws
+        # the other way.
+        return (level["backward"], 0.0, -turn * level["back_arc"])
     return (0.0, 0.0, turn * level["turn"])
 
 
@@ -195,8 +201,10 @@ def ui_section(twists):
         "notes": (
             "twistForKeys(keys, ui, level) in demo/js/sim/commands.js: keys is a Set "
             "of held KeyboardEvent.code values (single letters such as 'w' also "
-            "work). W/S walk forward/backward at the selected level's speed, A/D "
-            "turn the body left/right (also while walking backward), A or D alone "
+            "work). W/S walk forward/backward at the selected level's speed. A/D "
+            "turn left/right: with W the body turns that way; with S they steer "
+            "like a car in reverse, so S+A backs along a path curving to the "
+            "walker's left while the body yaws right (wz < 0). A or D alone "
             "turns in place, opposite keys cancel, no key stands. Digit1-5 pick a "
             "level, Q/E step it down/up, Shift held uses the fast level. "
             "levels[*].actions[*].twist equals a library clip label exactly "

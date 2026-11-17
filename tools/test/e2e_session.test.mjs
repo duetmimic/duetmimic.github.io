@@ -26,6 +26,17 @@
 // asset fails create() at once, naming the file, instead of after the other
 // downloads.
 //
+// Dragging a body part (DemoSession.setPerturb, DragSpring): a 0.35 m pull to
+// the walker's left for 0.8 s, on the pelvis while standing and on the chest
+// while walking, moves the pelvis toward the target against an identical
+// unpulled run (and the standing walker recovers); xfrc_applied carries the
+// pull on the grabbed body only while a drag is active and is zero after a
+// release and after a reset; the force caps hold; the pull goes on through a
+// fall's relaxed collapse and the reset after it ends the drag with
+// 'perturb-end' {reason: 'fall-reset'} (a user reset: 'reset'); updates still
+// on their way for an ended drag are ignored; invalid requests are rejected
+// with 'perturb-end' {reason: 'error'}.
+//
 // Inference: WebGPU through Dawn (the 'webgpu' package) when it finds a
 // hardware adapter, else the CPU. E2E_BACKEND=cpu|webgpu forces one.
 //
@@ -42,7 +53,7 @@ import { after, before, describe, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
-  DemoSession, Pacer, SHAPING, STARTING, STOPPING, clipLabel, speedText,
+  DRAG, DemoSession, Pacer, SHAPING, STARTING, STOPPING, clipLabel, speedText,
 } from '../../demo/js/session.js';
 
 const ASSETS = new URL('../../demo/assets/r2/', import.meta.url);
@@ -75,6 +86,14 @@ const MAX_HESITANT_RESTARTS = 1; // restarts after a stop that miss the pace che
 // expect 0.27 falls, and 3 or more would happen with probability 0.3 %.
 const MASH_SEEDS = [0, 1];
 const MASH_MAX_FALLS = 2;
+
+// Dragging: rendered geoms to grab (model ids, demo.visual.geom_ids), each by
+// its origin (local [0, 0, 0]), and the pull of the scripted drags.
+const PELVIS = 338; // pelvis_r mesh, body pelvis
+const CHEST = 21; // the rib cage, body torso
+const HAND = 154; // third metacarpal, right hand
+const PULL = { offset: 0.35, hold: 0.8, ramp: 0.1, after: 2.0 }; // m to the left, s, s, s
+const PULL_MIN_SHIFT = 0.15; // m: the pelvis's lead over the unpulled run at the release
 
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const pct = (values, q) => {
@@ -162,6 +181,63 @@ function mashTimeline(seed, total) {
   }
   ev.sort((a, b) => a.t - b.t);
   return ev.filter((e) => e.t < total);
+}
+
+// The world position of a geom's origin now.
+function geomPoint(session, geom) {
+  const x = session.core.views().geom_xpos;
+  return [x[3 * geom], x[3 * geom + 1], x[3 * geom + 2]];
+}
+
+// The xfrc_applied rows that are not zero: [[body, |force|, |torque|], ...].
+function wrenches(session) {
+  const x = session.core.views().xfrc_applied, rows = [];
+  for (let b = 0; 6 * b < x.length; b++) {
+    const r = x.subarray(6 * b, 6 * b + 6);
+    if (r.some((value) => value !== 0)) rows.push([b, Math.hypot(r[0], r[1], r[2]), Math.hypot(r[3], r[4], r[5])]);
+  }
+  return rows;
+}
+
+// From a reset, `total` control steps with `keys` held, recording the pelvis
+// (the observation anchor), the grabbed geom's origin and the heading after
+// every step. With pull = {from, hold, ramp, offset (world [x, y, z]), path
+// (an unpulled run's geom track)}, drags `geom` from step `from` for `hold`
+// steps toward path + offset (ramped in over `ramp` steps), then releases.
+async function dragRun(session, { keys, total, geom, pull = null }) {
+  session.reset();
+  session.level = session.ui.default_level;
+  session.setKeys(keys);
+  const anchor = session.demo.sim.body_ids[0];
+  const pelvis = new Float64Array(3 * (total + 1)), point = new Float64Array(3 * (total + 1));
+  const heading = new Float64Array(total + 1);
+  const record = (k) => {
+    const xpos = session.core.views().xpos;
+    for (let i = 0; i < 3; i++) pelvis[3 * k + i] = xpos[3 * anchor + i];
+    point.set(geomPoint(session, geom), 3 * k);
+    heading[k] = session.pose().heading;
+  };
+  let fellAt = -1, peak = 0;
+  const off = session.on('fall', () => { if (fellAt < 0) fellAt = session.steps; });
+  const steps0 = session.steps;
+  record(0);
+  for (let k = 0; k < total; k++) {
+    if (pull && fellAt >= 0) {
+      // fallen: the reset after it ended the drag, the caller reports it
+    } else if (pull && k >= pull.from && k < pull.from + pull.hold) {
+      const a = Math.min(1, (k - pull.from + 1) / pull.ramp);
+      const target = [0, 1, 2].map((i) => pull.path[3 * k + i] + a * pull.offset[i]);
+      assert.equal(session.setPerturb({ geom, local: [0, 0, 0], target }), k === pull.from ? 'start' : 'update');
+    } else if (pull && k === pull.from + pull.hold) {
+      session.clearPerturb();
+    }
+    await session.step();
+    if (session.drag.active) peak = Math.max(peak, session.drag.force);
+    record(k + 1);
+  }
+  off();
+  session.clearPerturb();
+  return { pelvis, point, heading, peak, fellAt: fellAt < 0 ? -1 : fellAt - steps0 };
 }
 
 // WebGPU (Dawn) with a hardware adapter, else the CPU.
@@ -437,6 +513,33 @@ describe('DemoSession end to end', { skip: SKIP }, () => {
     session.level = session.ui.default_level;
   });
 
+  test('S+A backs up curving to the walker\'s left, S+D to its right (car in reverse)', async (t) => {
+    for (const [turnKey, side] of [['KeyA', 1], ['KeyD', -1]]) {
+      session.reset();
+      session.level = session.ui.default_level;
+      session.setKeys(['KeyS', turnKey]);
+      const start = session.pose();
+      const steps = Math.round(4 / session.dt);
+      for (let k = 0; k < steps; k++) {
+        await session.step();
+        assert.equal(session.fall, null, 'no fall');
+      }
+      const end = session.pose();
+      // Displacement in the start pose's frame: x along its facing, y to its left.
+      const dx = end.x - start.x, dy = end.y - start.y;
+      const c = Math.cos(start.heading), s = Math.sin(start.heading);
+      const back = -(dx * c + dy * s), left = -dx * s + dy * c;
+      const yaw = wrap(end.heading - start.heading);
+      t.diagnostic(`S+${turnKey.slice(3)}: back ${back.toFixed(2)} m, left ${left.toFixed(2)} m, yaw ${yaw.toFixed(2)} rad`);
+      assert.ok(back > 0.8, `walked backward (${back.toFixed(2)} m)`);
+      assert.ok(side * left > 0.1, `curved to the ${side > 0 ? 'left' : 'right'} (${left.toFixed(2)} m)`);
+      assert.ok(side * yaw < 0, `body yawed the other way (${yaw.toFixed(2)} rad)`);
+    }
+    session.setKeys([]);
+    session.reset();
+    session.level = session.ui.default_level;
+  });
+
   test('key-masher: falls within the measured bound, holds within their limits', async (t) => {
     const perSeed = Number(process.env.E2E_MASH_SECONDS || (picked.backend === 'webgpu' ? 30 : 15));
     const steps = Math.round(perSeed / session.dt);
@@ -520,6 +623,181 @@ describe('DemoSession end to end', { skip: SKIP }, () => {
     assert.equal(session.status().falling, false);
     assert.ok(session.status().time < 1e-9, 'back at t = 0');
     assert.ok(Math.abs(session.pose().z - 0.94) < 0.05, `standing again (root z ${session.pose().z.toFixed(3)}, was ${z0.toFixed(3)})`);
+  });
+
+  test('drag: a sideways pull on the pelvis (standing) and the chest (walking) moves the walker toward it', async (t) => {
+    const n = (seconds) => Math.round(seconds / session.dt);
+    const cases = [
+      { name: 'standing, pelvis', keys: [], warm: 1.0, geom: PELVIS, recovers: true },
+      { name: 'walking, chest', keys: ['KeyW'], warm: 3.0, geom: CHEST, recovers: false },
+    ];
+    for (const c of cases) {
+      const from = n(c.warm), hold = n(PULL.hold), total = from + hold + n(PULL.after);
+      const free = await dragRun(session, { keys: c.keys, total, geom: c.geom });
+      assert.equal(free.fellAt, -1, `${c.name}: the unpulled run fell`);
+      const h = free.heading[from];
+      const left = [-Math.sin(h), Math.cos(h), 0];
+      const pull = { from, hold, ramp: n(PULL.ramp), offset: left.map((x) => PULL.offset * x), path: free.point };
+      const pulled = await dragRun(session, { keys: c.keys, total, geom: c.geom, pull });
+      // The pelvis's lead to the left over the unpulled run.
+      const lead = (k) => [0, 1, 2].reduce((s, i) => s + (pulled.pelvis[3 * k + i] - free.pelvis[3 * k + i]) * left[i], 0);
+      const release = from + hold;
+      let most = -Infinity;
+      for (let k = from; k <= release; k++) most = Math.max(most, lead(k));
+      const fell = pulled.fellAt >= 0 ? `fell ${((pulled.fellAt - release) * session.dt).toFixed(2)} s after the release` : `recovered (no fall in ${PULL.after} s)`;
+      t.diagnostic(`${c.name}: ${PULL.offset} m for ${PULL.hold} s, peak ${pulled.peak.toFixed(0)} N; pelvis ${lead(release).toFixed(3)} m `
+        + `toward the target at the release (most ${most.toFixed(3)} m); ${fell}`);
+      assert.ok(pulled.fellAt < 0 || pulled.fellAt > release, `${c.name}: fell during the pull`);
+      assert.ok(lead(release) > PULL_MIN_SHIFT, `${c.name}: the pelvis moved ${lead(release).toFixed(3)} m toward the target (want > ${PULL_MIN_SHIFT})`);
+      assert.ok(pulled.peak > 0 && pulled.peak <= DRAG.maxForce, `${c.name}: peak force ${pulled.peak}`);
+      if (c.recovers) assert.equal(pulled.fellAt, -1, `${c.name}: a moderate pull should not topple it (${fell})`);
+    }
+    session.setKeys([]);
+    session.reset();
+  });
+
+  test('drag: xfrc_applied holds the pull only during a drag; the force caps hold', async () => {
+    session.reset();
+    session.setKeys([]);
+    const body = session.drag.geomBody[PELVIS];
+    const p = geomPoint(session, PELVIS);
+    assert.deepEqual(wrenches(session), [], 'nothing applied after a reset');
+    assert.equal(session.setPerturb({ geom: PELVIS, local: [0, 0, 0], target: [p[0], p[1] + 0.3, p[2]], id: 7 }), 'start');
+    let s = session.status().perturb;
+    assert.equal(s.active, true);
+    assert.equal(s.geom, PELVIS);
+    assert.equal(s.body, body);
+    assert.equal(s.id, 7);
+    // The spring: k = vis.map.stiffness (100), m = the effective mass, counted at most maxMass.
+    const m = session.drag.effective;
+    assert.ok(m > 15 && m < 40, `effective mass at the pelvis ${m.toFixed(2)} kg`);
+    assert.ok(Math.abs(session.drag.km - session.model.vis.map.stiffness * Math.min(m, DRAG.maxMass)) < 1e-9);
+    for (let k = 0; k < 20; k++) {
+      await session.step();
+      const rows = wrenches(session);
+      assert.equal(rows.length, 1, 'one body pulled');
+      assert.equal(rows[0][0], body, 'the grabbed body');
+      assert.ok(rows[0][1] > 0 && Math.abs(rows[0][1] - session.drag.force) < 1e-9, `force ${rows[0][1]} vs ${session.drag.force}`);
+    }
+    s = session.status().perturb;
+    assert.ok(s.force > 0 && s.force <= s.maxForce && s.stretch > 0, JSON.stringify(s));
+    assert.equal(session.clearPerturb(), true, 'released');
+    assert.equal(session.status().perturb.active, false);
+    await session.step();
+    assert.deepEqual(wrenches(session), [], 'nothing applied after the release');
+
+    // A wild drag, 5 m away: |F| stops at maxForce.
+    const q = geomPoint(session, PELVIS);
+    assert.equal(session.setPerturb({ geom: PELVIS, local: [0, 0, 0], target: [q[0], q[1] + 5, q[2]] }), 'start');
+    for (let k = 0; k < 5; k++) {
+      await session.step();
+      assert.ok(wrenches(session)[0][1] <= DRAG.maxForce + 1e-9);
+    }
+    assert.equal(session.drag.peak, DRAG.maxForce, 'saturated at maxForce');
+    assert.equal(session.status().perturb.force, DRAG.maxForce);
+    // A hand, 3 m away: |F| stops at maxAccel times its effective mass.
+    const r = geomPoint(session, HAND);
+    assert.equal(session.setPerturb({ geom: HAND, local: [0, 0, 0], target: [r[0], r[1] + 3, r[2]] }), 'start', 'another geom: a new grab');
+    const hand = session.drag.effective, limit = DRAG.maxAccel * hand;
+    assert.ok(hand > 0.3 && hand < 2 && limit < DRAG.maxForce, `effective mass at the hand ${hand.toFixed(2)} kg`);
+    assert.equal(session.status().perturb.maxForce, limit);
+    for (let k = 0; k < 5; k++) {
+      await session.step();
+      const rows = wrenches(session);
+      assert.deepEqual(rows.map((row) => row[0]), [session.drag.geomBody[HAND]]);
+      assert.ok(rows[0][1] <= limit + 1e-9);
+    }
+    assert.ok(Math.abs(session.drag.peak - limit) < 1e-9, `hand peak ${session.drag.peak} vs ${limit}`);
+
+    // A reset ends the drag and clears xfrc_applied.
+    const events = [];
+    const off = session.on('*', (e) => events.push(e));
+    session.reset();
+    off();
+    assert.deepEqual(events.map((e) => [e.type, e.reason]), [['perturb-end', 'reset'], ['reset', 'user']]);
+    assert.equal(events[0].geom, HAND);
+    assert.equal(session.status().perturb.active, false);
+    assert.deepEqual(wrenches(session), [], 'nothing applied after the reset');
+    await session.step();
+    assert.deepEqual(wrenches(session), []);
+    session.reset();
+  });
+
+  test('drag: the pull goes on through a fall; the reset after it ends the drag with perturb-end', async () => {
+    session.reset();
+    session.setKeys([]);
+    const events = [];
+    const off = session.on('*', (e) => events.push(e));
+    const body = session.drag.geomBody[PELVIS];
+    const p = geomPoint(session, PELVIS);
+    const grab = { geom: PELVIS, local: [0, 0, 0], target: [p[0] + 2, p[1], p[2]] }; // a big pull
+    assert.equal(session.setPerturb(grab), 'start');
+    for (let n = 0; n < 400 && !session.fall; n++) await session.step();
+    assert.ok(session.fall, 'the pull toppled it');
+    // While the body goes down (relaxed), the drag still pulls and still follows.
+    assert.equal(session.status().perturb.active, true);
+    assert.equal(session.setPerturb({ ...grab, target: [p[0] + 2, p[1], p[2] + 0.5] }), 'update');
+    await session.step();
+    assert.ok(session.fall, 'still falling');
+    const rows = wrenches(session);
+    assert.ok(rows.length === 1 && rows[0][0] === body && rows[0][1] > 0, 'pulling during the collapse');
+    let steps = 0;
+    while (session.fall && steps < 500) {
+      await session.step();
+      steps += 1;
+    }
+    off();
+    const end = events.findIndex((e) => e.type === 'perturb-end');
+    const reset = events.findIndex((e) => e.type === 'reset');
+    assert.ok(end >= 0 && events[end].reason === 'fall-reset', 'perturb-end {reason: fall-reset}');
+    assert.equal(events[end].geom, PELVIS);
+    assert.equal(events[end].body, body);
+    assert.ok(reset > end && events[reset].reason === 'fall', 'then the reset');
+    assert.equal(session.status().perturb.active, false);
+    assert.deepEqual(wrenches(session), [], 'nothing applied after the reset');
+    // Updates for the ended drag, still on their way, are ignored...
+    assert.equal(session.setPerturb(grab), 'stale');
+    await session.step();
+    assert.deepEqual(wrenches(session), []);
+    // ...until the page releases (or grabs elsewhere).
+    session.clearPerturb();
+    assert.equal(session.setPerturb(grab), 'start');
+    session.clearPerturb();
+    session.reset();
+  });
+
+  test('drag: invalid requests are rejected, end any drag and never touch the physics', async () => {
+    session.reset();
+    session.setKeys([]);
+    const ended = [];
+    const off = session.on('perturb-end', (e) => ended.push(e));
+    const p = geomPoint(session, PELVIS);
+    const good = { geom: PELVIS, local: [0, 0, 0], target: p };
+    const drawn = new Set(session.demo.visual.geom_ids);
+    const hidden = [...Array(session.model.ngeom).keys()].find((g) => !drawn.has(g)); // e.g. the floor
+    const bad = [
+      null, 'perturb', {},
+      { ...good, geom: hidden }, { ...good, geom: -1 }, { ...good, geom: session.model.ngeom },
+      { ...good, geom: 1.5 }, { ...good, geom: String(PELVIS) }, { ...good, geom: undefined },
+      { ...good, local: [0, NaN, 0] }, { ...good, local: [0, 0] }, { ...good, local: [1, 0, 0] }, { ...good, local: null },
+      { ...good, target: [p[0], Infinity, p[2]] }, { ...good, target: undefined }, { ...good, target: [1e5, 0, 0] },
+      { ...good, target: ['1', '2', '3'] },
+    ];
+    for (const spec of bad) assert.equal(session.setPerturb(spec), 'invalid', JSON.stringify(spec));
+    assert.equal(ended.length, bad.length, 'each one tells the page to drop its drag');
+    for (const e of ended) assert.ok(e.reason === 'error' && /^perturb: /.test(e.message), JSON.stringify(e));
+    assert.equal(session.status().perturb.active, false);
+    await session.step();
+    assert.deepEqual(wrenches(session), [], 'nothing applied');
+    // An invalid update ends a running drag.
+    assert.equal(session.setPerturb(good), 'start');
+    assert.equal(session.setPerturb({ ...good, target: [NaN, 0, 0] }), 'invalid');
+    assert.equal(session.status().perturb.active, false);
+    assert.equal(ended.at(-1).geom, PELVIS);
+    await session.step();
+    assert.deepEqual(wrenches(session), []);
+    off();
+    session.reset();
   });
 
   // Fail fast: a missing file rejects create() as soon as it fails, naming

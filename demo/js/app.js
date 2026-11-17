@@ -23,12 +23,18 @@
 // first touch, an on-screen pad (#touch-pad) holds the same KeyboardEvent.code
 // values as the keyboard; help and hints switch to touch wording.
 //
+// Pulling: a press on the body (left button, or one finger) grabs the part
+// under it and drags it: the worker pulls that point toward the cursor with a
+// damped spring (MuJoCo's mouse perturbation), and the walker has to catch
+// itself. A press on the background orbits as before. See "pulling" below.
+//
 // Rendering: the walker is drawn between the worker's per-step poses
 // (render/scene.js), and only when something changed, so a paused or
 // off-screen demo costs no GPU work.
 //
 // Query: ?backend=cpu|webgpu (default auto), ?debug=1 (extra HUD rows).
-// Test hook: window.__duet.state(), .stats(), .events().
+// Test hook: window.__duet.state(), .stats(), .events(), and for pulling
+// .pick(clientX, clientY), .project([x, y, z]), .geomPoint(geom, local?).
 
 import { loadContainer, loadJSON } from './lib/container.js';
 
@@ -41,10 +47,10 @@ const UNLISTED_BYTES = 2475508 + 577000;
 const CAMERA_MODES = ['chase', 'follow', 'free'];
 const CAMERA_NAMES = {
   chase: 'behind the walker',
-  follow: 'fixed angle (drag to orbit)',
-  free: 'free (drag to orbit, right-drag to pan)',
+  follow: 'fixed angle (drag the background to orbit)',
+  free: 'free (drag the background to orbit, right-drag to pan)',
 };
-const CAMERA_NAMES_TOUCH = { ...CAMERA_NAMES, free: 'free (drag to orbit, two fingers to pan)' };
+const CAMERA_NAMES_TOUCH = { ...CAMERA_NAMES, free: 'free (drag the background to orbit, two fingers to pan)' };
 const TOAST_MS = 1500;
 const ZOOM_HINT_MS = 4000; // embedded: "Ctrl + scroll to zoom" at most this often
 const CONTEXT_RESTORE_MS = 5000; // a lost WebGL context not back by then ends the demo
@@ -136,6 +142,7 @@ function fail(message, detail) {
   el.loaderStatus.textContent = message;
   el.startBtn.disabled = true;
   clearKeys();
+  try { endDrag(false); } catch { /* the view is gone too */ }
   if (app.worker) {
     try { app.worker.terminate(); } catch { /* ignore */ }
   }
@@ -521,6 +528,7 @@ function toggleFast() {
 
 function resetSim() {
   if (app.phase !== 'running' || !app.worker) return;
+  endDrag();
   app.worker.postMessage({ type: 'reset' });
   toast('Reset');
 }
@@ -556,6 +564,164 @@ function onButton(button, action) {
   }));
 }
 
+// ------------------------------------------------------------------ pulling
+// Click (or touch) and drag a body part to pull it. The worker applies MuJoCo's
+// mouse perturbation at every physics tick: a damped spring, scaled by the
+// mass the grabbed point moves, from that point to a target (world
+// coordinates). Messages: {type: 'perturb', geom, local, target, id} starts or
+// moves the pull (id numbers the drags; the worker echoes it in status() and
+// 'perturb-end'), {type: 'perturb', release: true} ends it.
+//  - pointerdown (capture phase on #viewport, so a hit never reaches
+//    OrbitControls on the canvas): view.pick(). On the body: capture the
+//    pointer, switch OrbitControls off and hold the camera (view.holdCamera:
+//    a camera following the pulled walker would carry the target along, so a
+//    pull held still would never let up), post the start (target = the
+//    grabbed point: no force yet). On the background: nothing, OrbitControls
+//    orbits.
+//  - Every animation frame while dragging, after the view's update: the target
+//    is view.dragTarget() for the last pointer position with this frame's
+//    camera (under the cursor, at the grabbed point's depth); posted when it
+//    moved (at most once per frame) and drawn (view.setPerturb).
+//  - Release on pointerup, pointercancel, lostpointercapture, a mouse move with
+//    the left button up (a release the page never saw), window blur, a
+//    hidden tab, the frame scrolled away, a lost WebGL context, a reset, or the
+//    worker's 'perturb-end' event for this drag's id (the worker ended it: a
+//    reset, a fall, an invalid request; one without an id is a request that
+//    never started). The worker ignores target updates still on their way for
+//    a drag it ended; the release posted then anyway costs nothing.
+//  - Hover: at most one pick per animation frame; the cursor shows 'grab' over
+//    the body and 'grabbing' during a drag.
+// Mouse: the left button. Touch: a finger alone on the canvas. A finger on the
+// touch pad does not count, so one thumb can walk while the other pulls (the
+// pad finger is the primary pointer then, so isPrimary cannot decide); a
+// second finger on the canvas makes a pinch, and does nothing during a drag.
+// Only while running; allowed while paused, when the pull acts on resuming.
+const TARGET_EPS = 1e-4; // m: smaller moves of the target are not posted
+const PICK_SLOP = 4; // CSS px: a press this close to the body still grabs it (view.pick)
+const PICK_SLOP_TOUCH = 12; // a fingertip
+let grab = null; // the drag: {id, pointerId, pointerType, geom, body, local, x, y, target, sent}
+let dragCount = 0; // drags so far: the next id
+const canvasTouches = new Set(); // touch pointers down on the canvas (a drag, an orbit, a pinch)
+const hover = { x: 0, y: 0, pending: false, cursor: '' };
+const pulls = { started: 0, updates: 0, released: 0, ended: 0 }; // perturb messages posted, perturb-end events honoured (test hook)
+
+const viewCanvas = () => (app.view ? app.view.renderer.domElement : null);
+
+function setCursor(cursor) {
+  const canvas = viewCanvas();
+  if (!canvas || hover.cursor === cursor) return;
+  hover.cursor = cursor;
+  canvas.style.cursor = cursor;
+}
+
+function postPerturb(message) {
+  if (app.worker && app.phase !== 'failed') app.worker.postMessage({ type: 'perturb', ...message });
+}
+
+function onPointerDown(e) {
+  const canvas = viewCanvas();
+  if (!canvas || e.target !== canvas) return;
+  if (e.pointerType === 'touch') canvasTouches.add(e.pointerId);
+  if (grab) return;
+  if (app.phase !== 'running' || app.offscreen || app.contextLost) return;
+  if (e.button !== 0 || (e.pointerType === 'touch' ? canvasTouches.size > 1 : !e.isPrimary)) return;
+  const hit = app.view.pick(e.clientX, e.clientY, e.pointerType === 'touch' ? PICK_SLOP_TOUCH : PICK_SLOP);
+  if (!hit) {
+    setCursor('');
+    return; // the background: OrbitControls orbits
+  }
+  e.stopPropagation(); // OrbitControls (on the canvas) never sees this press
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* the pointer is already gone */ }
+  app.view.setControlsEnabled(false);
+  app.view.holdCamera(true);
+  dragCount += 1;
+  grab = {
+    id: dragCount, pointerId: e.pointerId, pointerType: e.pointerType, geom: hit.geom, body: hit.body, local: hit.local,
+    x: e.clientX, y: e.clientY, target: hit.point, sent: hit.point,
+  };
+  postPerturb({ geom: hit.geom, local: hit.local, target: hit.point, id: grab.id });
+  pulls.started += 1;
+  app.view.setPerturb({ geom: hit.geom, local: hit.local, target: hit.point, force: 0 });
+  setCursor('grabbing');
+}
+
+function onPointerMove(e) {
+  if (grab) {
+    if (e.pointerId === grab.pointerId) {
+      // The left button is up, yet no pointerup came: it was released where
+      // the page could not see it (outside the window in Playwright's
+      // Firefox, for one). Let go now rather than pull on.
+      if (e.pointerType === 'mouse' && (e.buttons & 1) === 0) {
+        endDrag();
+        return;
+      }
+      grab.x = e.clientX;
+      grab.y = e.clientY;
+    }
+    return;
+  }
+  if (e.pointerType === 'touch' || e.buttons !== 0) return; // no hover; orbiting
+  hover.x = e.clientX;
+  hover.y = e.clientY;
+  hover.pending = true;
+}
+
+function onPointerEnd(e) {
+  if (grab && e.pointerId === grab.pointerId) endDrag();
+}
+
+// End the drag on this side; post the release unless the worker is gone.
+function endDrag(notify = true) {
+  if (!grab) return;
+  const g = grab;
+  grab = null; // first: releasing the capture below fires lostpointercapture
+  const canvas = viewCanvas();
+  try {
+    if (canvas && canvas.hasPointerCapture(g.pointerId)) canvas.releasePointerCapture(g.pointerId);
+  } catch { /* the pointer is gone */ }
+  if (app.view) {
+    app.view.setControlsEnabled(true);
+    app.view.holdCamera(false);
+    app.view.setPerturb(null);
+  }
+  if (notify) {
+    postPerturb({ release: true });
+    pulls.released += 1;
+  }
+  setCursor('');
+  if (g.pointerType !== 'touch') { // still over the body? The next frame's hover pick says
+    hover.x = g.x;
+    hover.y = g.y;
+    hover.pending = true;
+  }
+}
+
+// Per animation frame, after view.update(): the drag's target, or the hover cursor.
+function pointerFrame() {
+  if (grab) {
+    const target = app.view.dragTarget(grab.x, grab.y, grab);
+    if (!target) {
+      endDrag();
+      return;
+    }
+    grab.target = target;
+    const s = grab.sent;
+    if (Math.abs(target[0] - s[0]) > TARGET_EPS || Math.abs(target[1] - s[1]) > TARGET_EPS || Math.abs(target[2] - s[2]) > TARGET_EPS) {
+      postPerturb({ geom: grab.geom, local: grab.local, target, id: grab.id });
+      grab.sent = target;
+      pulls.updates += 1;
+    }
+    // The line's width: the force the worker last reported for this drag.
+    const p = app.status && app.status.perturb;
+    const mine = p && p.active && (p.id === undefined || p.id === null || p.id === grab.id);
+    const force = mine && Number.isFinite(p.force) ? p.force : 0;
+    app.view.setPerturb({ geom: grab.geom, local: grab.local, target, force, maxForce: p ? p.maxForce : undefined });
+  } else if (hover.pending) {
+    hover.pending = false;
+    setCursor(app.phase === 'running' && !app.offscreen && app.view.pick(hover.x, hover.y, PICK_SLOP) ? 'grab' : '');
+  }
+}
+
 // ------------------------------------------------------------------ worker output
 let heldFrame = null; // arrived before the renderer existed
 
@@ -577,9 +743,13 @@ function onFrame(frame) {
     return;
   }
   // A new epoch is a reset: the camera goes back to its view with the frame
-  // that shows it (the first frame gets the default view anyway).
+  // that shows it (the first frame gets the default view anyway), and a pull
+  // on the old pose ends.
   if (frame.epoch !== app.epoch) {
-    if (app.epoch !== null) app.view.resetView();
+    if (app.epoch !== null) {
+      app.view.resetView();
+      endDrag();
+    }
     app.epoch = frame.epoch;
   }
   app.view.setFrame(frame);
@@ -648,6 +818,14 @@ function onEvent(event) {
     case 'backend':
       toast('WebGPU stopped working, so inference moved to the CPU', 4000);
       break;
+    case 'perturb-end':
+      // The worker let go (reset, fall, invalid request) of this drag, or of a
+      // request that never started (no id); not of an older drag.
+      if (grab && (event.id === undefined || event.id === null || event.id === grab.id)) {
+        pulls.ended += 1;
+        endDrag();
+      }
+      break;
     default:
       break;
   }
@@ -709,10 +887,12 @@ function startWorker() {
 }
 
 // ------------------------------------------------------------------ render loop
-// Every animation frame: the renderer updates and draws only if the picture
-// changed; nothing at all while the frame is off screen or without a context.
-// While paused the clock stands still (dt 0), so the camera stops easing with
-// the walker and drawing stops at once; orbiting and zooming still draw.
+// Every animation frame: the renderer updates, the drag's target follows the
+// pointer with this frame's camera (or the hover cursor is checked), and the
+// renderer draws only if the picture changed; nothing at all while the frame
+// is off screen or without a context. While paused the clock stands still
+// (dt 0), so the camera stops easing with the walker and drawing stops at
+// once; orbiting and zooming still draw.
 let fpsFrames = 0;
 let fpsSince = 0;
 
@@ -720,9 +900,13 @@ function renderLoop(t) {
   if (app.phase === 'failed') return;
   requestAnimationFrame(guardedRender);
   app.frames.rafs += 1;
-  if (!app.offscreen && !app.contextLost && app.view.tick(pauseReasons.size > 0 ? 0 : undefined)) {
-    app.frames.renders += 1;
-    fpsFrames += 1;
+  if (!app.offscreen && !app.contextLost) {
+    app.view.update(pauseReasons.size > 0 ? 0 : undefined);
+    pointerFrame();
+    if (app.view.drawIfChanged()) {
+      app.frames.renders += 1;
+      fpsFrames += 1;
+    }
   }
   if (!fpsSince) fpsSince = t;
   if (t - fpsSince >= 1000) {
@@ -747,6 +931,7 @@ function watchContext(canvas) {
   canvas.addEventListener('webglcontextlost', guard(() => {
     app.contextLost = true;
     clearKeys();
+    endDrag();
     setPause('context', true);
     toast('The graphics context was lost; trying to restore it…', CONTEXT_RESTORE_MS);
     clearTimeout(contextTimer);
@@ -759,6 +944,25 @@ function watchContext(canvas) {
     app.view.invalidate();
     hideToast();
   }));
+}
+
+// Pulling (see "pulling" above). The press is caught on #viewport in the
+// capture phase, before the canvas and so before OrbitControls; the rest of
+// the drag comes to the canvas, which holds the pointer capture.
+function watchPointer(canvas) {
+  el.viewport.addEventListener('pointerdown', guard(onPointerDown), { capture: true });
+  for (const type of ['pointerup', 'pointercancel']) { // wherever the finger ends up
+    window.addEventListener(type, (e) => { canvasTouches.delete(e.pointerId); }, { capture: true });
+  }
+  canvas.addEventListener('pointermove', guard(onPointerMove));
+  for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    canvas.addEventListener(type, guard(onPointerEnd));
+  }
+  canvas.addEventListener('pointerleave', guard(() => {
+    hover.pending = false;
+    if (!grab) setCursor('');
+  }));
+  canvas.addEventListener('contextmenu', (e) => { if (grab) e.preventDefault(); });
 }
 
 // ------------------------------------------------------------------ debug rows
@@ -812,8 +1016,23 @@ window.__duet = Object.freeze({
       clipName: s ? s.clipName : null,
       level: s ? s.level : null,
       keys: heldCodes(),
+      // Pulling: this side's drag, the perturb messages posted so far, and the
+      // worker's view of it (status().perturb: {active, geom, body, id, force,
+      // maxForce, stretch}).
+      perturb: {
+        active: grab !== null,
+        id: grab ? grab.id : null,
+        geom: grab ? grab.geom : null,
+        body: grab ? grab.body : null,
+        local: grab ? grab.local.slice() : null,
+        target: grab ? grab.target.slice() : null,
+        ...pulls,
+        worker: s && s.perturb ? { ...s.perturb } : null,
+      },
+      cursor: hover.cursor,
       camera: app.view ? app.view.cameraMode : null,
       cameraDistance: app.view ? app.view.cameraDistance : null,
+      cameraAzimuth: app.view ? app.view.cameraAzimuth : null,
       help: app.help,
       touch: app.touch,
       offscreen: app.offscreen,
@@ -846,6 +1065,11 @@ window.__duet = Object.freeze({
     };
   },
   events() { return app.events.slice(); },
+  // Pulling helpers: what a press at a client point would grab, a world point
+  // on screen (client coordinates), a drawn geom's point in the world.
+  pick(clientX, clientY, slop = PICK_SLOP) { return app.view ? app.view.pick(clientX, clientY, slop) : null; },
+  project(point) { return app.view ? app.view.projectToClient(point) : null; },
+  geomPoint(geom, local) { return app.view ? app.view.geomPoint(geom, local) : null; },
 });
 
 // ------------------------------------------------------------------ main
@@ -876,10 +1100,17 @@ async function main() {
 
   window.addEventListener('keydown', guard(onKeyDown));
   window.addEventListener('keyup', guard(onKeyUp));
-  window.addEventListener('blur', guard(clearKeys));
+  window.addEventListener('blur', guard(() => {
+    clearKeys();
+    endDrag();
+  }));
   window.addEventListener('touchstart', guard(setTouch), { capture: true, passive: true, once: true });
   document.addEventListener('visibilitychange', guard(() => {
-    if (document.hidden) clearKeys();
+    if (document.hidden) {
+      clearKeys();
+      endDrag();
+      canvasTouches.clear(); // their pointerup or pointercancel may never come
+    }
     setPause('hidden', document.hidden);
   }));
   if (embedded) {
@@ -902,7 +1133,10 @@ async function main() {
       new IntersectionObserver(guard((entries) => {
         const visible = entries[entries.length - 1].isIntersecting;
         app.offscreen = !visible;
-        if (!visible) clearKeys();
+        if (!visible) {
+          clearKeys();
+          endDrag();
+        }
         setPause('offscreen', !visible);
       })).observe(el.viewport);
     }
@@ -947,6 +1181,7 @@ async function main() {
     return;
   }
   watchContext(app.view.renderer.domElement);
+  watchPointer(app.view.renderer.domElement);
   el.camera.dataset.mode = app.view.cameraMode;
   if (heldFrame) {
     const frame = heldFrame;

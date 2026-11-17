@@ -19,10 +19,13 @@
 //       reported, exactness not required);
 // plus the per-step physics error from recorded states, the reset state, and
 // Node timings of SimCore.step with stub policies.
+//
+// Also, on the slim demo model alone (no trace needed): SimCore's disturbance
+// hook clears xfrc_applied and runs before every mj_step.
 
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { before, describe, test } from 'node:test';
+import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { fetchBytes, loadContainer, loadJSON } from '../../demo/js/lib/container.js';
@@ -322,5 +325,63 @@ describe('SimCore vs osl_deploy trace', { skip: SKIP }, () => {
     console.log(`[sim] Node timing over ${k} steps: SimCore.step ${total.toFixed(2)} ms (physics: 5 x mj_step ${(physics / k).toFixed(2)} ms; mj_forward + reference + observations ${(observe / k).toFixed(3)} ms)`);
     results.timing = { total, physics: physics / k, observe: observe / k };
     assert.ok(total < 50);
+  });
+});
+
+// SimCore's disturbance hook (core.disturb, applyDisturbances), on the slim
+// demo model with stub policies (zero means): before every mj_step
+// xfrc_applied is cleared and the hook called with the tick since the reset;
+// its wrench moves the body; without a hook nothing is applied.
+const SLIM = new URL('demo/assets/r2/physics.mjb.gz', REPO);
+const SLIM_SKIP = [SLIM, DEMO, REFERENCE].some((u) => !existsSync(fileURLToPath(u)))
+  ? 'missing demo/assets/r2: run python -m duet_export' : false;
+
+describe('SimCore disturbance hook', { skip: SLIM_SKIP }, () => {
+  let mujoco, model, data, core;
+
+  before(async () => {
+    mujoco = await loadMujoco();
+    ({ model, data } = modelFromBytes(mujoco, await fetchBytes(SLIM), 'physics.mjb'));
+    const demo = await loadJSON(DEMO);
+    const reference = await loadContainer(REFERENCE);
+    const zeros = (n) => ({ run: async () => new Float32Array(n) });
+    core = new SimCore({
+      mujoco, model, data, cfg: demo, reference,
+      policies: { human: zeros(demo.sim.human.action.size), osl: zeros(demo.sim.osl.action.size) },
+    });
+  });
+
+  test('clears xfrc_applied, then calls the hook before every mj_step', async () => {
+    const PELVIS = 92, PUSH = 300; // N along +x, at the pelvis's center of mass
+    const calls = [];
+    core.reset();
+    core.views().xfrc_applied.fill(7); // stale garbage: cleared before the first tick
+    core.disturb = (m, d, tick, v) => {
+      assert.equal(m, model);
+      assert.equal(d, data);
+      assert.ok(v.xfrc_applied.every((x) => x === 0), `cleared before tick ${tick}`);
+      calls.push(tick);
+      v.xfrc_applied[6 * PELVIS] += PUSH;
+    };
+    const pushed = [];
+    for (let k = 0; k < 20; k++) {
+      await core.step();
+      pushed.push(core.views().qpos[0]);
+    }
+    assert.deepEqual(calls, Array.from({ length: 20 * core.sim.decimation }, (_, i) => i));
+    assert.equal(core.views().xfrc_applied[6 * PELVIS], PUSH, 'the last tick\'s wrench stays visible');
+    // The same 20 steps without the hook: nothing applied, the root drifts less in +x.
+    core.disturb = null;
+    core.reset();
+    for (let k = 0; k < 20; k++) await core.step();
+    assert.ok(core.views().xfrc_applied.every((x) => x === 0), 'no hook: nothing applied');
+    const shift = pushed.at(-1) - core.views().qpos[0];
+    assert.ok(shift > 0.01, `${PUSH} N for 0.2 s moved the root ${shift.toFixed(4)} m along +x`);
+  });
+
+  after(() => {
+    core = null;
+    data?.delete();
+    model?.delete();
   });
 });

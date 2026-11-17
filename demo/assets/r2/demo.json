@@ -3534,11 +3534,11 @@
    },
    "backward_left": {
     "keys": "S+A",
-    "label": "Backward, turning left"
+    "label": "Backward, curving left"
    },
    "backward_right": {
     "keys": "S+D",
-    "label": "Backward, turning right"
+    "label": "Backward, curving right"
    },
    "turn_left": {
     "keys": "A",
@@ -3608,21 +3608,21 @@
       "twist": [
        -0.5,
        0.0,
-       0.25
+       -0.25
       ],
       "keys": "S+A",
-      "label": "Backward, turning left",
-      "speed": "-0.50 m/s, 0.25 rad/s"
+      "label": "Backward, curving left",
+      "speed": "-0.50 m/s, -0.25 rad/s"
      },
      "backward_right": {
       "twist": [
        -0.5,
        0.0,
-       -0.25
+       0.25
       ],
       "keys": "S+D",
-      "label": "Backward, turning right",
-      "speed": "-0.50 m/s, -0.25 rad/s"
+      "label": "Backward, curving right",
+      "speed": "-0.50 m/s, 0.25 rad/s"
      },
      "turn_left": {
       "twist": [
@@ -3704,21 +3704,21 @@
       "twist": [
        -0.6000000238418579,
        0.0,
-       0.25
+       -0.25
       ],
       "keys": "S+A",
-      "label": "Backward, turning left",
-      "speed": "-0.60 m/s, 0.25 rad/s"
+      "label": "Backward, curving left",
+      "speed": "-0.60 m/s, -0.25 rad/s"
      },
      "backward_right": {
       "twist": [
        -0.6000000238418579,
        0.0,
-       -0.25
+       0.25
       ],
       "keys": "S+D",
-      "label": "Backward, turning right",
-      "speed": "-0.60 m/s, -0.25 rad/s"
+      "label": "Backward, curving right",
+      "speed": "-0.60 m/s, 0.25 rad/s"
      },
      "turn_left": {
       "twist": [
@@ -3800,21 +3800,21 @@
       "twist": [
        -0.6000000238418579,
        0.0,
-       0.25
+       -0.25
       ],
       "keys": "S+A",
-      "label": "Backward, turning left",
-      "speed": "-0.60 m/s, 0.25 rad/s"
+      "label": "Backward, curving left",
+      "speed": "-0.60 m/s, -0.25 rad/s"
      },
      "backward_right": {
       "twist": [
        -0.6000000238418579,
        0.0,
-       -0.25
+       0.25
       ],
       "keys": "S+D",
-      "label": "Backward, turning right",
-      "speed": "-0.60 m/s, -0.25 rad/s"
+      "label": "Backward, curving right",
+      "speed": "-0.60 m/s, 0.25 rad/s"
      },
      "turn_left": {
       "twist": [
@@ -3896,21 +3896,21 @@
       "twist": [
        -0.699999988079071,
        0.0,
-       0.25
+       -0.25
       ],
       "keys": "S+A",
-      "label": "Backward, turning left",
-      "speed": "-0.70 m/s, 0.25 rad/s"
+      "label": "Backward, curving left",
+      "speed": "-0.70 m/s, -0.25 rad/s"
      },
      "backward_right": {
       "twist": [
        -0.699999988079071,
        0.0,
-       -0.25
+       0.25
       ],
       "keys": "S+D",
-      "label": "Backward, turning right",
-      "speed": "-0.70 m/s, -0.25 rad/s"
+      "label": "Backward, curving right",
+      "speed": "-0.70 m/s, 0.25 rad/s"
      },
      "turn_left": {
       "twist": [
@@ -3992,21 +3992,21 @@
       "twist": [
        -0.699999988079071,
        0.0,
-       0.25
+       -0.25
       ],
       "keys": "S+A",
-      "label": "Backward, turning left",
-      "speed": "-0.70 m/s, 0.25 rad/s"
+      "label": "Backward, curving left",
+      "speed": "-0.70 m/s, -0.25 rad/s"
      },
      "backward_right": {
       "twist": [
        -0.699999988079071,
        0.0,
-       -0.25
+       0.25
       ],
       "keys": "S+D",
-      "label": "Backward, turning right",
-      "speed": "-0.70 m/s, -0.25 rad/s"
+      "label": "Backward, curving right",
+      "speed": "-0.70 m/s, 0.25 rad/s"
      },
      "turn_left": {
       "twist": [
@@ -4033,7 +4033,7 @@
   ],
   "default_level": 2,
   "fast_level": 4,
-  "notes": "twistForKeys(keys, ui, level) in demo/js/sim/commands.js: keys is a Set of held KeyboardEvent.code values (single letters such as 'w' also work). W/S walk forward/backward at the selected level's speed, A/D turn the body left/right (also while walking backward), A or D alone turns in place, opposite keys cancel, no key stands. Digit1-5 pick a level, Q/E step it down/up, Shift held uses the fast level. levels[*].actions[*].twist equals a library clip label exactly (twist = [vx m/s, vy m/s, wz rad/s], wz > 0 turns left)."
+  "notes": "twistForKeys(keys, ui, level) in demo/js/sim/commands.js: keys is a Set of held KeyboardEvent.code values (single letters such as 'w' also work). W/S walk forward/backward at the selected level's speed. A/D turn left/right: with W the body turns that way; with S they steer like a car in reverse, so S+A backs along a path curving to the walker's left while the body yaws right (wz < 0). A or D alone turns in place, opposite keys cancel, no key stands. Digit1-5 pick a level, Q/E step it down/up, Shift held uses the fast level. levels[*].actions[*].twist equals a library clip label exactly (twist = [vx m/s, vy m/s, wz rad/s], wz > 0 turns left)."
  },
  "visual": {
   "format": "duetmimic-visual/1",

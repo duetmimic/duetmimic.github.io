@@ -1,6 +1,8 @@
 // Browser test of demo/js/render/{frame,scene}.js: headless Chromium renders the
 // fixture poses (traces/render_poses.json) with the ORIGINAL bundle model and
-// saves 1280x720 screenshots.
+// saves 1280x720 screenshots. It also checks the camera modes, and picking
+// for the drag-to-pull feature against MuJoCo's own geom frames (pickChecks()
+// in render_pose.html), and saves render_pull.png with a pull drawn.
 //
 //   cd tools
 //   DUET_BROWSER_TESTS=1 PLAYWRIGHT_BROWSERS_PATH=<ms-playwright> \
@@ -104,6 +106,35 @@ test('renderer screenshots in headless Chromium', { skip: process.env.DUET_BROWS
     assert.ok(cam.follow < 0.01 && cam.offsetDrift < 0.001, 'follow mode');
     assert.ok(cam.chaseError < 3 && cam.chaseElevationError < 3, 'chase mode');
     assert.ok(cam.freeDrift < 1e-6 && cam.lightLag < 0.01, 'free mode: camera stays, light follows the walker');
+
+    // Picking: grabbed points lie on the named geom in MuJoCo's own frame,
+    // within the worker's reach rule, under the cursor; drag targets too.
+    const pk = await page.evaluate(() => window.renderTest.pickChecks());
+    console.log(`# pick: ${pk.hits} hits in ${pk.picks} cursor positions (${pk.muscleOnly} on muscles only, ${pk.slopHits} more within 4 px), ` +
+      `${pk.bodies} bodies, ${pk.ms.toFixed(3)} ms per pick; errors: world ${(pk.world * 1000).toFixed(4)} mm, screen ${pk.screen.toFixed(3)} px, ` +
+      `reach ${(pk.reach * 100).toFixed(1)} cm past geom_rbound, drag target ${pk.target.toFixed(3)} px, off its plane ${(pk.plane * 1000).toFixed(4)} mm; ` +
+      `overlay ${JSON.stringify(pk.overlay)}`);
+    assert.ok(pk.hits > 400 && pk.bodies > 20 && pk.muscleOnly > 0, 'the walker can be grabbed, muscles included');
+    assert.ok(pk.world < 1e-4, `a grabbed point is ${pk.world} m off MuJoCo's geom frame`);
+    assert.ok(pk.screen < 0.5 && pk.target < 0.5, 'grabbed points and drag targets sit under the cursor');
+    assert.ok(pk.reach < 0.05, `a grabbed point lies ${pk.reach} m past geom_rbound (the worker allows 0.05)`);
+    assert.ok(pk.plane < 1e-6, 'drag targets lie in the plane through the grabbed point, square to the view');
+    assert.ok(pk.ms < 2, `${pk.ms} ms per pick`);
+    const o = pk.overlay;
+    assert.ok(o.shown && o.grabDot < 0.6 && o.targetDot < 0.6, 'the pull is drawn from the grabbed point to the target');
+    assert.ok(Math.abs(o.lineWidth - 3.4) < 0.11, `half the maximum force widens the line half way (${o.lineWidth} px)`);
+    assert.deepEqual(o.litBodies, [o.hit.body], 'only the grabbed body glows');
+    assert.ok(o.hidden && o.unlit, 'setPerturb(null) clears the pull and the glow');
+    await page.evaluate(() => {
+      const t = window.renderTest, v = t.view;
+      t.shot({ pose: 'stride', azimuth: -60, elevation: -10, distance: 3.0 });
+      const xy = v.projectToClient(v.geomPoint(21));
+      const hit = v.pick(xy[0], xy[1], 24);
+      v.setPerturb({ geom: hit.geom, local: hit.local, target: v.dragTarget(xy[0] + 140, xy[1] - 30, hit), force: 300, maxForce: 400 });
+      v.render();
+    });
+    await page.screenshot({ path: path.join(OUT, 'render_pull.png') });
+    await page.evaluate(() => { window.renderTest.view.setPerturb(null); window.renderTest.view.render(); });
 
     // Resize follows the host; dispose removes the canvas.
     await page.setViewportSize({ width: 800, height: 450 });

@@ -113,7 +113,11 @@
      app.js shows the panel after Start: data-mode="full", or "compact" (the
      one-line legend) when embedded; H, ? and #btn-help switch between them.
      On touch screens (html.touch) it starts hidden and the touch rows replace
-     the keys. -->
+     the keys. A/D read "turn" throughout: walking backward they steer like a
+     car in reverse (S+A backs along a path that curves to the walker's left,
+     demo.json "Backward, curving left"). The Drag rows: a press on the body
+     grabs the part under it and pulls it toward the pointer (app.js,
+     "pulling"); a drag on the background orbits. -->
 <aside id="help" class="panel" aria-labelledby="help-title" data-mode="full" hidden>
   <h2 id="help-title">How to play</h2>
   <dl class="key-grid">
@@ -125,20 +129,23 @@
     <div><dt><kbd data-key="Space">Space</kbd></dt><dd>Pause</dd></div>
     <div><dt><kbd data-key="KeyR" data-label="KeyR">R</kbd></dt><dd>Reset</dd></div>
     <div><dt><kbd data-key="KeyC" data-label="KeyC">C</kbd></dt><dd>Change camera</dd></div>
+    <div><dt><span class="pad-key drag-key">Drag</span></dt><dd>Pull a body part</dd></div>
   </dl>
   <dl class="touch-grid">
     <div><dt><span class="pad-key">&#x25B2;</span><span class="pad-key">&#x25BC;</span></dt><dd>Hold to walk</dd></div>
     <div><dt><span class="pad-key">&#x25C0;&#xFE0E;</span><span class="pad-key">&#x25B6;&#xFE0E;</span></dt><dd>Hold to turn</dd></div>
     <div><dt><span class="pad-key">Fast</span></dt><dd>Top speed</dd></div>
+    <div><dt><span class="pad-key drag-key">Drag</span></dt><dd>Pull a body part</dd></div>
   </dl>
   <p class="help-notes">
+    <span>Pulled off balance, it has to catch itself.</span>
     <span class="for-keys">Arrow keys steer too; <span data-label="KeyH">H</span> toggles this panel.</span>
-    <span class="for-keys">Drag to orbit, <span class="zoom-page">scroll to zoom.</span><span class="zoom-embed"><span data-zoom-key>Ctrl</span> + scroll to zoom.</span></span>
-    <span class="for-touch">Drag to orbit, pinch to zoom.</span>
+    <span class="for-keys">Drag the background to orbit, <span class="zoom-page">scroll to zoom.</span><span class="zoom-embed"><span data-zoom-key>Ctrl</span> + scroll to zoom.</span></span>
+    <span class="for-touch">Drag the background to orbit, pinch to zoom.</span>
     <span>Muscle colour: pale = relaxed, deep red = active.</span>
   </p>
   <!-- One-line legend: the embedded help, and very short windows. -->
-  <p class="help-compact"><b data-label="KeyW">W</b>/<b data-label="KeyS">S</b> walk · <b data-label="KeyA">A</b>/<b data-label="KeyD">D</b> turn · <b>1</b>–<b>5</b> speed · <b>Space</b> pause · <b data-label="KeyR">R</b> reset · <b data-label="KeyC">C</b> camera · <b data-label="KeyH">H</b> help</p>
+  <p class="help-compact"><b data-label="KeyW">W</b>/<b data-label="KeyS">S</b> walk · <b data-label="KeyA">A</b>/<b data-label="KeyD">D</b> turn · <b>1</b>–<b>5</b> speed · <b>Space</b> pause · <b data-label="KeyR">R</b> reset · <b data-label="KeyC">C</b> camera · <b>Drag</b> body to pull · <b data-label="KeyH">H</b> help</p>
 </aside>
 
 <!-- Touch steering, shown on touch screens (html.touch). Each arrow holds the

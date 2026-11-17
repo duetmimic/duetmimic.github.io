@@ -9,14 +9,38 @@
 //   {type: 'pause', paused}               the session starts paused
 //   {type: 'reset'}
 //   {type: 'recycle', buffer}             a frame buffer back (transferred)
+//   {type: 'perturb', geom, local, target, id?}
+//                                         start or update a drag (pull a body
+//                                         part): geom a rendered robot geom
+//                                         (demo.visual.geom_ids), local the
+//                                         grabbed point in its frame (world =
+//                                         geom_xpos + geom_xmat . local), target
+//                                         the world point it is pulled toward
+//                                         (MuJoCo world, z up, m); id optional,
+//                                         echoed. On pointerdown, then at most
+//                                         once per animation frame
+//   {type: 'perturb', release: true}      the visitor let go
 // Worker -> main:
 //   {type: 'progress', loaded, total, stage, parts}
 //   {type: 'ready', info}                 followed by a first frame and status
 //   {type: 'frame', frame}                frame.buffer is transferred; frame.time
 //                                         (s) and frame.epoch, see below
-//   {type: 'status', status}              about 4 per second, and on changes
-//   {type: 'event', event}                fall, reset, level, pause, backend
+//   {type: 'status', status}              about 4 per second, and on changes;
+//                                         status.perturb: {active, geom, body,
+//                                         id, force (N), maxForce, stretch (m)}
+//   {type: 'event', event}                fall, reset, level, pause, backend,
+//                                         perturb-end (below)
 //   {type: 'error', message, stack}       the worker stops after an error
+//
+// Drags (DemoSession.setPerturb, DragSpring in session.js): the spring pulls at
+// every physics tick until a release. The worker ends a drag on its own with
+// the event perturb-end {reason, message, geom, body, id}, after which the
+// page drops its drag: reason 'reset' (R, the Reset button), 'fall-reset' (the
+// reset after a fall; the drag keeps pulling through the fall itself) or
+// 'error' (an invalid perturb message, e.g. a geom that is not drawn or a
+// non-finite number, which never stops the worker; or the worker failing).
+// Updates for a drag the worker ended, still on their way, are ignored; a
+// release or a new grab (another geom or local point) starts over.
 //
 // Pacing: control steps run until simulated time catches up with wall time.
 // More than 0.25 s behind, the debt is dropped and the real-time factor falls
@@ -75,6 +99,9 @@ function fail(error) {
   dead = true;
   clearTimeout(timer);
   timer = 0;
+  try { // a drag in progress ends with the simulation
+    if (session && session.drag.active) session.clearPerturb('error', 'the simulation stopped');
+  } catch { /* the error below says it all */ }
   try {
     post({ type: 'error', ...describeError(error) });
   } catch {
@@ -211,6 +238,25 @@ function setPaused(paused) {
   schedule();
 }
 
+// A drag message. DemoSession.setPerturb checks it (a rendered robot geom, a
+// grabbed point on it, finite numbers): an invalid one ends any drag with
+// perturb-end {reason: 'error'} and leaves the simulation running.
+function perturb(message) {
+  if (dead) return;
+  if (!session) { // not loaded yet: nothing can be dragged
+    if (!message.release) {
+      post({ type: 'event', event: { type: 'perturb-end', reason: 'error', message: 'perturb: the simulation is not ready', geom: null, body: null, id: null } });
+    }
+    return;
+  }
+  if (message.release) {
+    if (session.clearPerturb('release')) sendStatus();
+    return;
+  }
+  const result = session.setPerturb({ geom: message.geom, local: message.local, target: message.target, id: message.id });
+  if (result === 'start') sendStatus();
+}
+
 // ------------------------------------------------------------------ messages
 self.onmessage = (event) => {
   const message = event.data || {};
@@ -244,6 +290,9 @@ self.onmessage = (event) => {
         lastReturnAt = now();
         if (message.buffer && session) session.recycle(message.buffer);
         if (frameOwed && !busy) postFrame();
+        break;
+      case 'perturb':
+        perturb(message);
         break;
       default:
         break;

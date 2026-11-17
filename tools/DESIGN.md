@@ -3,12 +3,23 @@
 A static GitHub Pages site, served from the repo `duetmimic/duetmimic.github.io` at https://duetmimic.github.io/. Its interactive demo runs the
 stage-2 split-network unicycle policy (osl_deploy bundle
 `stage2_R2_model_6898`: a 339-muscle human actor plus an onboard OSL actor) in
-the browser. You steer it with WASD. **Scope: a stripped-down demo you can pilot.**
+the browser. You steer it with WASD (or the on-screen pad), and you can drag
+a body part with the mouse or a finger to pull it off balance.
+**Scope: a stripped-down demo you can pilot.**
 It is not a port of osl_deploy. It keeps only what the two policies need to
 walk: their observations, the gait-library reference with blending and rebase,
 the training actuator delay, and the OSL sensor history. It drops stress
 tests, async mode, telemetry and exact parity suites. Physics may differ from
 native MuJoCo in the last bits.
+
+Controls: W/S walk forward/backward, A/D turn left/right, A or D alone turns
+in place, 1-5 and Shift set the speed. Walking backward, A/D steer like a car
+in reverse (user request, 2026-11-16): S+A backs along a path that curves to
+the walker's left while its body yaws right (wz < 0), so, seen from behind
+it, it comes toward you and moves to your left; S+D mirrors it. The HUD says
+"Backward, curving left/right". A press on the body (left button or one
+finger) grabs the part under it and pulls it toward the pointer until the
+release; a press on the background orbits as before.
 
 ## Stack
 - Physics: official MuJoCo **3.11.0** WebAssembly build, vendored in
@@ -27,7 +38,8 @@ native MuJoCo in the last bits.
   the collision meshes' convex hulls and replaces the mesh BVHs with
   single-node stubs. Its dynamics are bit-identical to the bundle model. It
   loads in about 0.6 s in WASM; the full model takes 25 s. Rays (mj_ray,
-  picking) miss mesh geoms.
+  mjv_select) miss mesh geoms, so the drag's picking casts its rays on the
+  render meshes on the main thread instead (render/scene.js `pick()`).
 - Rendering: three.js 0.187.0, vendored in `demo/vendor/three/`, on the main
   thread. Physics and inference run in a module Web Worker (`demo/js/worker.js`).
   Pages load three through an import map. From `demo/index.html` it is
@@ -41,13 +53,13 @@ native MuJoCo in the last bits.
 index.html, static/{css,js}/               landing page (title, looping video, embedded demo)
 static/media/, static/img/                 teaser video and posters, social card og.jpg; favicon, apple-touch-icon
 demo/index.html, demo/css/demo.css         full-window demo page (?embed=1 when iframed)
-demo/js/app.js                             main thread: UI, keyboard and touch input, renderer, worker client
+demo/js/app.js                             main thread: UI, keyboard, touch and drag input, renderer, worker client
 demo/js/worker.js                          worker: message protocol + real-time pacing around DemoSession
-demo/js/session.js                         DemoSession (no DOM): loading, SimCore, command shaping, fall handling, HUD status
+demo/js/session.js                         DemoSession (no DOM): loading, SimCore, command shaping, drag spring, fall handling, HUD status
 demo/js/lib/{container,mujoco}.js          shared loaders (DUETBIN1 containers, MuJoCo wasm)
 demo/js/sim/                               SimCore: reference, observations, delay, step loop, commands
 demo/js/nn/                                MLP engine (CPU + WebGPU)
-demo/js/render/                            frame extraction (worker side) + three.js scene (main)
+demo/js/render/                            frame extraction (worker side) + three.js scene, picking, pull overlay (main)
 demo/vendor/{mujoco,three}/                pinned third-party builds
 demo/assets/r2/                            exported assets (below)
 tools/duet_export/                          Python exporter (osl-deploy Conda env), reads osl_deploy
@@ -78,10 +90,16 @@ named, 16-byte-aligned little-endian arrays. Do not invent other formats.
 // sim/ (SimCore): pure logic + MuJoCo calls, no DOM; runs in worker and Node
 const core = new SimCore({ mujoco, model, data, cfg: demo, reference /*container arrays*/,
                            policies: { human, osl } /* {run(Float32Array) -> Promise<Float32Array>} */ });
-core.reset();                      // idle clip, frame 0, standing
+core.reset();                      // idle clip, frame 0, standing (mj_resetData also clears xfrc_applied)
 core.requestTwist([vx, vy, wz]);   // latched; consumed at the next control boundary (blend rules)
 const info = await core.step();    // one 10 ms control step (5 physics ticks)
 // info: {time, failed, failure, siteError, clip, clipName, twist, phase, blending}
+core.disturb = (model, data, tick, views) => {};  // optional, null by default: called before every
+                                   // mj_step on a cleared views.xfrc_applied; adds world-frame wrenches
+                                   // (force, torque about xipos); reads the kinematics mj_step left (the
+                                   // tick before, as MuJoCo's viewer); must not allocate
+core.applyDisturbances(views?);    // clear xfrc_applied, call disturb: step() does it per tick; code
+                                   // that steps outside step() (the session's relaxed fall) calls it too
 twistForKeys(keys, demo.ui)        // sim/commands.js: Set of held keys -> {twist, label}
 
 // nn/: const policy = await loadPolicy(url, { backend: 'auto' | 'webgpu' | 'cpu',
@@ -99,7 +117,27 @@ twistForKeys(keys, demo.ui)        // sim/commands.js: Set of held keys -> {twis
 //      The first failure rejects at once, aborts the other downloads and disposes the
 //      policies that still finish. session.status(): HUD fields, incl. command ('Starting…' /
 //      'Stopping…' while command shaping holds a walk), shaping (null | 'start' | 'reverse'),
-//      backend, backendReason (= the human policy's info.reason), cpuKernel.
+//      backend, backendReason (= the human policy's info.reason), cpuKernel, perturb.
+//      Pulling (DragSpring and DRAG in session.js, see Findings):
+//      session.setPerturb({geom, local: [x, y, z], target: [x, y, z], id?}) starts a drag or moves
+//      its target -> 'start' | 'update' | 'stale' (an update for a drag the session ended itself:
+//      ignored until a release or another grab) | 'invalid' (any drag ends with perturb-end
+//      {reason: 'error', message}). geom: a rendered robot geom (demo.visual.geom_ids, the same
+//      ids as the physics model); local: the grabbed point in the geom's frame (world = geom_xpos +
+//      geom_xmat · local, geom_xmat row-major), within geom_rbound + 5 cm; target: MuJoCo world, m.
+//      session.clearPerturb(reason = 'release', message?) -> whether a drag was active; any reason
+//      but 'release' ('reset', 'fall-reset', 'error') emits 'perturb-end' {reason, message, geom,
+//      body, id}. reset() ends a drag first, so 'perturb-end' comes before 'reset'. The spring acts
+//      at every physics tick, also through a fall's relaxed collapse. status().perturb: {active,
+//      geom, body, id, force (N, the latest tick), maxForce (N, this grab's cap), stretch (m)}.
+// worker.js, pulling: main -> worker {type: 'perturb', geom, local, target, id?} (on pointerdown,
+//      then at most once per animation frame) and {type: 'perturb', release: true} (pointerup,
+//      pointercancel, lostpointercapture, a mouse move with the left button up, blur, hidden,
+//      off-screen, a lost context, a reset);
+//      worker -> main {type: 'event', event: {type: 'perturb-end', reason, message, geom, body,
+//      id}} when the worker ends a drag itself: 'reset', 'fall-reset' or 'error' (an invalid
+//      message, one sent before loading finished, or a worker failure; never stops the worker).
+//      The page drops its drag on a perturb-end for its own id (or for none).
 // render/frame.js (worker, no three.js): new FrameExtractor(mujoco, model, demo.visual).extract(data)
 //      -> {frame, transfer} where transfer lists ArrayBuffers for postMessage. worker.js posts
 //      the pose after every control step (skipped while MAX_IN_FLIGHT = 6 frames are out) and adds
@@ -107,13 +145,32 @@ twistForKeys(keys, demo.ui)        // sim/commands.js: Set of held keys -> {twis
 // render/scene.js (main): new DemoRenderer(hostElement, demo.visual, visualArrays,
 //      { onRelease /* frame => {}: done with it, buffer back to the worker */, chaseAzimuth: 180, chaseElevation: -20, delay: 0.012 });
 //      .setFrame(frame) (timed frames are queued and drawn interpolated, `delay` behind the newest);
-//      .tick(dt?) once per animation frame: draws only if something changed, returns whether it drew;
+//      .tick(dt?) once per animation frame: draws only if something changed, returns whether it drew
+//      (= .update(dt?) then .drawIfChanged(); app.js calls the two halves, moving the drag target
+//      with this frame's camera in between);
 //      .render(dt?); .invalidate(); .resize(); .resetView(); .setCameraMode('chase'|'follow'|'free');
-//      .cameraMode; .cameraDistance; .stats; .dispose()
+//      .cameraMode; .cameraDistance; .cameraAzimuth (deg); .stats; .dispose()
+//      Pulling: .pick(clientX, clientY, slop?) -> {geom, body, local, point, distance} | null, the
+//      robot part under the cursor at the pose on screen (bones and OSL parts by their render
+//      triangles; a muscle grabs the nearest bone at the clicked point; slop in CSS px tries rings
+//      of rays around a miss); .dragTarget(clientX, clientY, {geom, local}) -> [x, y, z], the cursor
+//      ray met with the plane through the grabbed point, square to the view; .setPerturb({geom,
+//      local, target, force?, maxForce?} | null) draws the pull (svg.pull-overlay, wider as force
+//      nears maxForce) and lights the grabbed body; .setControlsEnabled(on) (OrbitControls);
+//      .holdCamera(on) (no following during a drag, glides back after); .projectToClient([x, y, z])
+//      -> [clientX, clientY] | null; .geomPoint(geom, local?) -> [x, y, z] as drawn.
+// app.js test hook: window.__duet.state() (incl. perturb: {active, id, geom, body, local, target,
+//      started, updates, released, ended, worker: status().perturb}, cursor, cameraAzimuth),
+//      .stats(), .events(), .pick(clientX, clientY, slop?), .project([x, y, z]), .geomPoint(geom, local?).
 ```
 
 ## Demo page DOM contract (`demo/index.html`, used by `demo/js/app.js`)
-`#viewport` (renderer host, full window); `#loader` overlay with `#loader-title`,
+`#viewport` (renderer host, full window; app.js catches `pointerdown` on it in
+the capture phase, so a press on the body never reaches OrbitControls on the
+canvas. The renderer adds its canvas, whose `style.cursor` is `grab` over the
+body and `grabbing` during a drag, and `svg.pull-overlay`: aria-hidden, no
+pointer events, under the HUD panels, holding the pull's line, its halo, the
+dot on the body and the target ring); `#loader` overlay with `#loader-title`,
 `#loader-status`, `#loader-bar` (fill element, width in %), `#loader-size`,
 `#start-btn`; `#hud` (inert until Start) with `#hud-command` (the command
 label: `Starting…` or `Stopping…` while command shaping holds a walk back,
@@ -123,7 +180,10 @@ label: `Starting…` or `Stopping…` while command shaping holds a walk back,
 (`data-debug`, shown with `?debug=1`); `#help` (controls, hidden until Start,
 toggled by H; `data-mode` full or compact; `kbd[data-key=...]` get class
 `pressed` while held; elements with `data-label="<code>"` show what the
-visitor's keyboard layout prints for that code); `#touch-pad` (touch
+visitor's keyboard layout prints for that code; a "Drag: Pull a body part" row,
+`span.pad-key.drag-key`, in both the key grid and the touch grid, the note
+"Pulled off balance, it has to catch itself." and "Drag body to pull" in the
+one-line legend); `#touch-pad` (touch
 steering: `button[data-code]` hold `KeyW`, `KeyA`, `KeyS`, `KeyD`,
 `#pad-fast` toggles top speed); `#toast`; buttons
 `#btn-reset`, `#btn-pause`, `#btn-camera` (`data-mode`), `#btn-help`; `#error`
@@ -144,7 +204,8 @@ shell sets `html.embed`, `html.touch` (coarse pointer), `html.no-focus` and
 - The machine is shared with training jobs. Prefix heavy runs with `nice -n 19`,
   set `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1`, run no
   parallel sweeps, and keep closed-loop checks to a few minutes.
-- The user makes every git commit; the repository is initialised with none.
+- The user makes every git commit and push; tools and agents prepare the
+  working tree and stop there.
 
 ## Findings worth knowing (2026-11-16)
 - **Falls come from the policy, not the port.** SimCore matches osl_deploy's
@@ -214,6 +275,75 @@ shell sets `html.embed`, `html.touch` (coarse pointer), `html.no-focus` and
   walker's heading went from -149° to +64° over one U-turn in the play-test,
   after which W walked toward the camera and A and D looked reversed. C cycles
   chase, follow and free.
+- **Backward steering: a car in reverse.** The first key table turned the body
+  with A/D also while walking backward (tank-style: S+A yawed left, so the
+  path curved right), which the user found flipped. Since 2026-11-16 S+A
+  backs along a path that curves to the walker's left while the body yaws
+  right (wz = -back_arc), like a car reversing with the wheel turned left;
+  S+D mirrors it (`decimal_twist` in `tools/duet_export/simcfg.py`; the same
+  clips are reached, so `reference.bin.gz` did not change). In the demo, with
+  the camera held behind the walker, S+A comes toward the camera and leaves
+  the screen on the left: 1.8 m back, 0.9 m to the left and -1.04 rad of yaw
+  in 4 s at level 3; S+D leaves on the right. The help keeps "Turn left /
+  right" for A/D, and the HUD says "Backward, curving left/right".
+- **Pulling: a damped spring, MuJoCo's viewer perturbation retuned**
+  (`DragSpring` and `DRAG` in session.js, our own code after
+  `mjv_initPerturb` / `mjv_applyPerturbForce` in MuJoCo 3.11's
+  `engine_vis_interact.c`, Apache-2.0). At every physics tick, also through
+  a fall's 1 s collapse, the grabbed point p is pulled toward the target:
+  F = k m (target - p) - 2 zeta sqrt(k) m (v_p - v_root), capped, applied at
+  p (force plus torque (p - xipos) x F on the geom's body, in
+  `xfrc_applied`). k is `vis.map.stiffness` (100 1/s²) and m the effective
+  mass at p when the grab starts, the viewer's `localmass`
+  3 / trace(J M^-1 J^T): equal to native MuJoCo to 6 digits, 25 kg at the
+  pelvis, 33 kg at the chest, 10 kg at the head, 4 kg at a forearm, 1 kg at a
+  hand. The viewer's own spring is far too strong for the trunk (0.35 m on
+  the standing pelvis: 660 N, a fall), so m counts at most 3 kg (k m <= 300
+  N/m); zeta = 1 acts on the point's velocity relative to the walker's root
+  (the viewer damps the absolute velocity at a ratio of 0.5, which brakes a
+  walking body: 85 N against 38 N holding a walking pelvis 0.1 m off);
+  |F| <= 50 m/s² times the effective mass (a 3 m drag on a hand: 43 N, not
+  240 N) and <= 400 N. The viewer's torsional damping is left out. Standing,
+  0.35 m on the pelvis, chest or head (90-105 N) stumbles and recovers, and
+  0.8-1 m knocks it over; walking at 1 m/s, 0.35 m on the pelvis recovered in
+  7 of 8 trials and 0.6 m fell. The damper leaves the whole body's motion
+  alone by design, so a walker that steps toward the target can overshoot it
+  by up to about 0.2 m before the spring pulls it back. Standing, a pull on
+  the planted prosthesis foot hardly moves it (friction holds it). Without a
+  drag the closed loop is bit-identical to before.
+- **Pulling: the camera holds still during a drag.** The target is the cursor
+  ray met with the plane through the grabbed point, square to the view,
+  recomputed every animation frame so that it stays under the pointer. With
+  the camera following the walker, the camera carried the target along and a
+  held pull never let up: a 160 px pull held for 1.5 s dragged the walker
+  1.2 m, reached the 400 N cap and felled it. With `holdCamera`, the same drag
+  moved it 0.66 m while the force fell from 82 N to 8 N, and it caught itself.
+  The camera glides back after the release. While walking, a pointer held
+  still pulls increasingly down and sideways as the walker walks away into
+  the screen.
+- **Pulling: picking.** `pick()` casts the cursor ray on the render meshes at
+  the pose on screen: the slim physics model has no OSL mesh faces, so
+  `mj_ray` would miss the prosthesis. Triangles are grouped in runs of 128
+  with a box each: 0.04 ms per pick on the body, 0.3 ms for a miss (the 4 px
+  mouse slop casts 25 rays). 31% of the grabbable pixels show a muscle with
+  no bone behind it, so a muscle hit grabs the nearest bone at the clicked
+  point (unless a bone lies within 8 cm behind it), within that bone's
+  bounding radius + 3 cm; the worker accepts up to + 5 cm. `local` is in the
+  geom's frame, as the render meshes are stored.
+- **Pulling: touch.** A finger already on the touch pad is the primary
+  pointer, so a finger on the body is not, and `isPrimary` cannot decide which
+  finger may grab. app.js counts the touch pointers down on the canvas
+  instead: a finger alone on the canvas grabs, so one thumb can hold ▲ while
+  the other pulls; a second finger on the canvas makes a pinch, and does
+  nothing during a drag. In Chromium a second finger's tap fires no click, so
+  Reset and Pause do not respond while another finger drags.
+- **Pulling: a release the page never sees.** Chromium and WebKit deliver the
+  pointerup of the captured pointer when the button is released outside the
+  window, or outside the iframe on the landing page. Playwright's Firefox does
+  not; it sends a pointermove with no buttons instead. So app.js also ends a
+  drag on a mouse move with the left button up, besides window blur, a hidden
+  tab and the frame scrolling out of view. A drag the page still holds on to
+  ends at the next press and release.
 - **Render on demand and interpolation.** The worker posts the pose of every
   10 ms control step with its simulated time, and the main thread draws the
   walker between the two poses around its own clock. Before, poses went out
@@ -222,10 +352,16 @@ shell sets `html.embed`, `html.touch` (coarse pointer), `html.no-focus` and
   orbiting or zooming): nothing while the embedded frame is scrolled out of
   view (an IntersectionObserver also pauses the simulation then), and while
   paused only when the visitor orbits or zooms.
-- **WASM bindings: output arrays.** A plain Float64Array passed as an output
-  argument (e.g. `mj_objectVelocity`'s `res`) is copied in and never written
-  back. Use a heap view or `mujoco.DoubleBuffer`. SimCore computes body
-  velocities in JS.
+- **WASM bindings: output arrays.** An output argument (a `val` parameter in
+  the generated bindings, e.g. `mj_objectVelocity`'s `res`, `mj_jac`'s
+  `jacp`) takes a TypedArray's `byteOffset` as an address in the wasm heap.
+  A plain Float64Array's byteOffset is an offset into its own buffer (usually
+  0), so MuJoCo writes at that heap address: memory is silently corrupted and
+  the array never sees the result. Only views of the wasm heap (`data.qpos`,
+  `buffer.GetView()`) or a `mujoco.DoubleBuffer` are safe outputs. Input
+  arrays (`NumberArray` parameters such as `mj_jac`'s `point`) are copied, so
+  plain arrays are fine there. SimCore computes body velocities in JS;
+  DragSpring keeps its Jacobian scratch in DoubleBuffers.
 - **WASM bindings: loading.** `MjVFS.addBuffer` copies at about 5 MB/s.
   `lib/mujoco.js` writes to the Emscripten FS and loads through an empty
   MjVFS: 6 ms for the slim model.

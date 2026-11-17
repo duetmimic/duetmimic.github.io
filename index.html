@@ -104,7 +104,7 @@
     <div class="wrap">
       <div class="section-head">
         <h2 id="demo-title">Interactive demo</h2>
-        <p class="lede">Steer the model with your keyboard, or with the on-screen pad on a touch screen. Both policies run on your device: one drives the 339 muscles of the human model, the other drives the prosthesis knee and ankle from the leg’s own sensors. MuJoCo physics runs in the page as WebAssembly.</p>
+        <p class="lede">Steer the model with your keyboard, or with the on-screen pad on a touch screen, and drag a body part to pull it off balance: the model has to catch itself. Both policies run on your device: one drives the 339 muscles of the human model, the other drives the prosthesis knee and ankle from the leg’s own sensors. MuJoCo physics runs in the page as WebAssembly.</p>
       </div>
 
       <div class="demo-frame" id="demo-frame">
@@ -130,7 +130,8 @@
 
       <div class="demo-bar">
         <!-- Checked against demo.json "ui" and the help panel in demo/index.html
-             on 2026-11-16; keep them in step if the bindings change. -->
+             on 2026-11-16; keep them in step if the bindings change. "Drag":
+             a press on the body pulls it (a drag on the background orbits). -->
         <ul class="key-list" aria-label="Demo controls">
           <li><span class="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span> move and turn</li>
           <li><span class="keys"><kbd>1</kbd>–<kbd>5</kbd></span> speed</li>
@@ -138,6 +139,7 @@
           <li><span class="keys"><kbd>Space</kbd></span> pause</li>
           <li><span class="keys"><kbd>R</kbd></span> reset</li>
           <li><span class="keys"><kbd>C</kbd></span> camera</li>
+          <li><span class="keys"><kbd>Drag</kbd></span> pull the body</li>
         </ul>
         <div class="demo-actions">
           <button class="text-btn" id="demo-stop" type="button" hidden>

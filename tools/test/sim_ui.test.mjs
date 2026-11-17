@@ -41,8 +41,11 @@ describe('UI twist table', () => {
       if (action.startsWith('forward')) assert.ok(vx > 0);
       if (action.startsWith('backward')) assert.ok(vx < 0);
       if (action.startsWith('turn')) assert.equal(vx, 0);
-      if (action.endsWith('left')) assert.ok(wz > 0);
-      if (action.endsWith('right')) assert.ok(wz < 0);
+      // wz > 0 yaws the body left. Backward arcs steer like a car in reverse:
+      // S+A curves the path to the walker's left, so the body yaws right.
+      const yaw = action.startsWith('backward') ? -wz : wz;
+      if (action.endsWith('left')) assert.ok(yaw > 0);
+      if (action.endsWith('right')) assert.ok(yaw < 0);
       if (action === 'forward' || action === 'backward') assert.equal(wz, 0);
     }
     // The container holds exactly the clips the UI reaches.

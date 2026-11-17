@@ -139,6 +139,81 @@ async function main() {
     return { follow, offsetDrift, chaseError, chaseElevationError, freeDrift, lightLag };
   }
 
+  // Picking and pulling (view.pick, dragTarget, setPerturb) against MuJoCo on
+  // a still pose, over a grid of cursor positions every 8 px: each hit lies on
+  // the geom it names (world = geom_xpos + geom_xmat . local from MjData: the
+  // frame the worker uses), within the worker's reach rule (|local| <=
+  // geom_rbound + 5 cm) and under the cursor; a drag target stays under the
+  // moved cursor, in the plane through the grabbed point square to the view;
+  // the overlay's dots sit on both, and only the grabbed body glows.
+  function pickChecks() {
+    pose('stride');
+    view.setCameraMode('follow');
+    view.setView({ azimuth: -60, elevation: -10, distance: 3.0 });
+    view.render();
+    const rect = view.renderer.domElement.getBoundingClientRect();
+    const gx = data.geom_xpos, gm = data.geom_xmat, rbound = model.geom_rbound;
+    const out = { picks: 0, hits: 0, muscleOnly: 0, bodies: new Set(), world: 0, screen: 0, reach: -Infinity, target: 0, plane: 0, slopHits: 0, ms: 0 };
+    const forward = view.camera.getWorldDirection(view.camera.position.clone());
+    const t0 = performance.now();
+    for (let y = rect.top + 4; y < rect.bottom; y += 8) {
+      for (let x = rect.left + 4; x < rect.right; x += 8) {
+        out.picks += 1;
+        const h = view.pick(x, y);
+        if (!h) {
+          if (view.pick(x, y, 4)) out.slopHits += 1;
+          continue;
+        }
+        out.hits += 1;
+        out.bodies.add(h.body);
+        if (view._pickBones(view._cursorRay(x, y, true)).index < 0) out.muscleOnly += 1;
+        const g = h.geom, l = h.local, o = 3 * g, m = 9 * g;
+        const w = [
+          gx[o] + gm[m] * l[0] + gm[m + 1] * l[1] + gm[m + 2] * l[2],
+          gx[o + 1] + gm[m + 3] * l[0] + gm[m + 4] * l[1] + gm[m + 5] * l[2],
+          gx[o + 2] + gm[m + 6] * l[0] + gm[m + 7] * l[1] + gm[m + 8] * l[2],
+        ];
+        out.world = Math.max(out.world, Math.hypot(w[0] - h.point[0], w[1] - h.point[1], w[2] - h.point[2]));
+        const s = view.projectToClient(h.point);
+        out.screen = Math.max(out.screen, Math.hypot(s[0] - x, s[1] - y));
+        out.reach = Math.max(out.reach, Math.hypot(l[0], l[1], l[2]) - rbound[g]);
+        // A drag 40 px right and 30 px up from here.
+        const t = view.dragTarget(x + 40, y - 30, h);
+        const st = view.projectToClient(t);
+        out.target = Math.max(out.target, Math.hypot(st[0] - x - 40, st[1] - y + 30));
+        out.plane = Math.max(out.plane, Math.abs((t[0] - h.point[0]) * forward.x + (t[1] - h.point[1]) * forward.y + (t[2] - h.point[2]) * forward.z));
+      }
+    }
+    out.ms = (performance.now() - t0) / (out.picks + out.hits);
+
+    // The overlay and the glow for a grab on the torso, near the ribcage's
+    // origin (geom 21; the ray through it may pass between the ribs).
+    const xy = view.projectToClient(view.geomPoint(21));
+    const hit = view.pick(xy[0], xy[1], 24);
+    if (!hit) throw new Error('pickChecks: nothing to grab near the ribcage');
+    const target = view.dragTarget(xy[0] + 120, xy[1] - 20, hit);
+    view.setPerturb({ geom: hit.geom, local: hit.local, target, force: 200, maxForce: 400 });
+    view.render();
+    const svg = document.querySelector('#viewport svg');
+    const circles = [...svg.querySelectorAll('circle')].map((c) => [Number(c.getAttribute('cx')) + rect.left, Number(c.getAttribute('cy')) + rect.top]);
+    const grabbed = view.projectToClient(view.geomPoint(hit.geom, hit.local));
+    const glowing = (mesh) => mesh.material.emissive.getHex() !== 0;
+    const litBodies = [...new Set(view.geomMeshes.map((mesh, i) => (glowing(mesh) ? view._geomBody[i] : null)).filter((b) => b !== null))];
+    const overlay = {
+      shown: getComputedStyle(svg).display !== 'none',
+      grabDot: Math.hypot(circles[1][0] - grabbed[0], circles[1][1] - grabbed[1]),
+      targetDot: Math.hypot(circles[0][0] - xy[0] - 120, circles[0][1] - xy[1] + 20),
+      lineWidth: Number(svg.querySelectorAll('line')[1].getAttribute('stroke-width')),
+      hit: { geom: hit.geom, body: hit.body },
+      litBodies,
+    };
+    view.setPerturb(null);
+    view.render();
+    overlay.hidden = getComputedStyle(svg).display === 'none';
+    overlay.unlit = view.geomMeshes.every((mesh) => !glowing(mesh));
+    return { ...out, bodies: out.bodies.size, overlay };
+  }
+
   // Wall time per render(), each followed by a 1-pixel readPixels so the GPU
   // work is finished (software GL in headless runs: a bound, not a laptop figure).
   function timing(frames = 30) {
@@ -158,7 +233,7 @@ async function main() {
   const first = params.get('pose') || 'stride';
   const v = (params.get('view') || '').split(',').filter(Boolean).map(Number);
   const info = shot(v.length === 3 ? { pose: first, azimuth: v[0], elevation: v[1], distance: v[2] } : { pose: first });
-  window.renderTest = { shot, pose, move, cameraChecks, timing, view, extractor, glRenderer, modelSeconds, loadSeconds: (performance.now() - t0) / 1000 };
+  window.renderTest = { shot, pose, move, cameraChecks, pickChecks, timing, view, extractor, glRenderer, modelSeconds, loadSeconds: (performance.now() - t0) / 1000 };
   say(`${which} model ${modelSeconds.toFixed(1)} s, ${info.triangles} triangles, ${info.calls} calls, ${info.segments} muscle segments, ${glRenderer}`);
   window.renderReady = true;
 }
