@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DuetMimic · Musculoskeletal Human–Prosthesis Locomotion</title>
+<meta name="description" content="DuetMimic: Control Guided Reinforcement Learning for Musculoskeletal Human–Prosthesis Locomotion. Project page with an interactive demo that runs in your browser.">
+<meta name="theme-color" content="#ffffff">
+<link rel="canonical" href="https://duetmimic.github.io/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="DuetMimic">
+<meta property="og:title" content="DuetMimic: Control Guided Reinforcement Learning for Musculoskeletal Human–Prosthesis Locomotion">
+<meta property="og:description" content="A musculoskeletal human model walking with an Open-Source Leg prosthesis in simulation. Try the policy in your browser.">
+<meta property="og:url" content="https://duetmimic.github.io/">
+<!-- static/media/og.jpg: the social card, 1200x630 (README, "Page media"). -->
+<meta property="og:image" content="https://duetmimic.github.io/static/media/og.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="A musculoskeletal human model walking with an orange Open-Source Leg prosthesis, beside the DuetMimic title.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://duetmimic.github.io/static/media/og.jpg">
+<meta name="twitter:image:alt" content="A musculoskeletal human model walking with an orange Open-Source Leg prosthesis, beside the DuetMimic title.">
+<link rel="icon" href="static/img/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="static/img/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Inter+Tight:wght@600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="static/css/site.css">
+<script src="static/js/site.js" defer></script>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap-text">
+    <!-- TODO: venue, e.g. <p class="venue">Conference 2027</p> -->
+    <h1 class="title">DuetMimic</h1>
+    <p class="subtitle">Control Guided Reinforcement Learning for Musculoskeletal Human–Prosthesis Locomotion</p>
+
+    <!-- TODO: authors. One <span class="author"> per author; link each name
+         with <a href="...">, mark affiliations with <sup>, and use
+         <sup>*</sup> for equal contribution. These are placeholders. -->
+    <p class="authors">
+      <span class="author">First Author<sup>1</sup></span>
+      <span class="author">Second Author<sup>1</sup></span>
+      <span class="author">Third Author<sup>2</sup></span>
+    </p>
+    <!-- TODO: affiliations (placeholders). -->
+    <p class="affiliations">
+      <span><sup>1</sup>Affiliation</span>
+      <span><sup>2</sup>Affiliation</span>
+    </p>
+
+    <!-- TODO: links. When one exists, give its <a> an href (plus target="_blank"
+         rel="noopener"), drop aria-disabled, the "is-soon" class and the
+         sr-only "(coming soon)", and update or delete the note below. -->
+    <nav class="links" aria-label="Paper, code and demo">
+      <a class="pill is-soon" aria-disabled="true" title="Coming soon">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>
+        Paper<span class="sr-only"> (coming soon)</span>
+      </a>
+      <a class="pill is-soon" aria-disabled="true" title="Coming soon">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/></svg>
+        arXiv<span class="sr-only"> (coming soon)</span>
+      </a>
+      <a class="pill is-soon" aria-disabled="true" title="Coming soon">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 7 3.5 12l5 5M15.5 7l5 5-5 5M13.5 4.5l-3 15"/></svg>
+        Code<span class="sr-only"> (coming soon)</span>
+      </a>
+      <a class="pill is-soon" aria-disabled="true" title="Coming soon">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path class="fill" d="M10.4 9.1v5.8l4.8-2.9z"/></svg>
+        Video<span class="sr-only"> (coming soon)</span>
+      </a>
+      <a class="pill is-primary" href="#demo">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M9.5 10h.01M12.5 10h.01M15.5 10h.01M18 10h.01M8 14h8"/></svg>
+        Interactive demo
+      </a>
+    </nav>
+    <p class="links-note" aria-hidden="true">Paper, arXiv, code and video coming soon</p>
+  </div>
+</header>
+
+<main>
+
+  <section class="teaser" aria-label="Teaser video">
+    <figure class="wrap">
+      <div class="media media-video">
+        <video id="teaser-video" autoplay muted loop playsinline preload="auto" width="1920" height="1080"
+               poster="static/media/three_demos_poster.jpg"
+               aria-label="Musculoskeletal human models with an orange Open-Source Leg prosthesis: one walks backward, one follows an S-curve, and six climb stairs.">
+          <source src="static/media/three_demos.mp4" type="video/mp4">
+        </video>
+        <button class="video-toggle" id="teaser-toggle" type="button" aria-label="Pause video" data-state="playing">
+          <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13M16 5.5v13"/></svg>
+          <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8 5.2v13.6L19 12z"/></svg>
+        </button>
+      </div>
+      <figcaption class="caption">
+        Musculoskeletal human models with an Open-Source Leg prosthesis (orange), walking backward, along an S&#8209;curve and up stairs. All in simulation.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section class="section band" id="demo" aria-labelledby="demo-title">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="demo-title">Interactive demo</h2>
+        <p class="lede">Steer the model with your keyboard, or with the on-screen pad on a touch screen. Both policies run on your device: one drives the 339 muscles of the human model, the other drives the prosthesis knee and ankle from the leg’s own sensors. MuJoCo physics runs in the page as WebAssembly.</p>
+      </div>
+
+      <div class="demo-frame" id="demo-frame">
+        <!-- static/media/demo_poster.jpg: a 1600x900 frame of the running demo
+             (default camera, hardware GPU), the walker right of centre. -->
+        <div class="demo-poster" id="demo-poster">
+          <img src="static/media/demo_poster.jpg" width="1600" height="900" loading="lazy" decoding="async" alt="">
+          <div class="demo-cta">
+            <p class="demo-kicker">Runs in your browser</p>
+            <button class="start-btn" id="demo-start" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8 5.2v13.6L19 12z"/></svg>
+              Start interactive demo
+            </button>
+            <!-- Measured 2026-11-16: 31.2 MB over the wire (demo/assets/r2/*.gz and
+                 mujoco.wasm.gz as stored, the scripts gzip-encoded as GitHub Pages
+                 sends them). Re-measure when the exported assets change; the demo's
+                 own loader computes its figure from demo.json. site.js rewrites
+                 #demo-hint on touch screens and in browsers without WebGPU. -->
+            <p class="demo-note">About 31&nbsp;MB download<span id="demo-hint"> · best on a desktop with a keyboard</span></p>
+          </div>
+        </div>
+      </div>
+
+      <div class="demo-bar">
+        <!-- Checked against demo.json "ui" and the help panel in demo/index.html
+             on 2026-11-16; keep them in step if the bindings change. -->
+        <ul class="key-list" aria-label="Demo controls">
+          <li><span class="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span> move and turn</li>
+          <li><span class="keys"><kbd>1</kbd>–<kbd>5</kbd></span> speed</li>
+          <li><span class="keys"><kbd>Shift</kbd></span> top speed</li>
+          <li><span class="keys"><kbd>Space</kbd></span> pause</li>
+          <li><span class="keys"><kbd>R</kbd></span> reset</li>
+          <li><span class="keys"><kbd>C</kbd></span> camera</li>
+        </ul>
+        <div class="demo-actions">
+          <button class="text-btn" id="demo-stop" type="button" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect class="fill" x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>
+            Stop demo
+          </button>
+          <!-- While the demo runs, site.js puts the running iframe in full screen
+               instead; otherwise this opens demo/ as a page. -->
+          <a class="text-btn" id="demo-full" href="demo/">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+            Open full screen
+          </a>
+        </div>
+      </div>
+      <p class="fine-print">Fastest in a browser with WebGPU; otherwise the networks run on the CPU, slower than real time. The browser version is simplified for speed, so its physics can differ slightly from the paper’s simulations.</p>
+    </div>
+  </section>
+
+  <section class="section" id="abstract" aria-labelledby="abstract-title">
+    <div class="wrap-text">
+      <h2 id="abstract-title">Abstract</h2>
+      <!-- TODO: abstract. -->
+      <p class="abstract placeholder">Coming soon.</p>
+    </div>
+  </section>
+
+  <section class="section section-tight" id="bibtex" aria-labelledby="bibtex-title">
+    <div class="wrap-text">
+      <h2 id="bibtex-title">BibTeX</h2>
+      <div class="bib">
+        <div class="bib-head">
+          <span>Citation</span>
+          <button class="copy-btn" id="bib-copy" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg>
+            <span id="bib-copy-label">Copy</span>
+          </button>
+        </div>
+        <!-- TODO: BibTeX entry (placeholder). -->
+        <pre id="bib-text"><code>@article{duetmimic,
+  title   = {{DuetMimic}: Control Guided
+             Reinforcement Learning for
+             Musculoskeletal Human--Prosthesis
+             Locomotion},
+  author  = {Coming soon},
+  journal = {Coming soon},
+  year    = {Coming soon}
+}</code></pre>
+      </div>
+      <p class="sr-only" id="bib-status" aria-live="polite"></p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-row">
+    <p><b>DuetMimic</b></p>
+    <p>The interactive demo runs <a href="https://mujoco.org/">MuJoCo</a> (Apache-2.0) and <a href="https://threejs.org/">three.js</a> (MIT) in your browser.</p>
+    <!-- TODO before publishing (README, "Before publishing"): once their
+         licences are confirmed, credit the musculoskeletal model and the
+         Open-Source Leg geometry the demo redistributes, e.g.
+         <p>Human model: <a href="…">…</a> · Prosthesis: <a href="https://www.opensourceleg.org/">Open-Source Leg</a> (licence).</p> -->
+  </div>
+</footer>
+
+</body>
+</html>

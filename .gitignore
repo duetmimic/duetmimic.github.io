@@ -1,0 +1,9 @@
+# developer tooling (not needed to serve the site)
+tools/node_modules/
+tools/traces/
+tools/out/
+__pycache__/
+*.pyc
+.DS_Store
+demo/assets/*/.demo.json.lock
+demo/assets/*/*.tmp

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLP engine check</title>
+<style>
+  :root { --bg: #fff; --fg: #1b1b1b; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #151515; --fg: #e8e8e8; } }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.4 ui-monospace, monospace; margin: 16px; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>MLP engine check</h1>
+<p>Runs <code>demo/js/nn</code> inside a module Web Worker, as the demo does, and compares
+the WebGPU and CPU backends on the exported weights. Serve the repository root over
+http://127.0.0.1 (tools/test/nn_browser.test.mjs does) and open this page.</p>
+<pre id="log">running...</pre>
+<script type="module">
+// The worker is built from a Blob so that tools/test holds no stray .js file
+// (bare `node --test` runs every .js/.mjs under a test/ folder). Its imports
+// are absolute URLs of the real modules.
+const root = new URL('../../', location.href);
+const engine = new URL('demo/js/nn/index.js', root).href;
+const containers = new URL('demo/js/lib/container.js', root).href;
+const assets = new URL('demo/assets/r2/', root).href;
+const reference = new URL('tools/traces/nn_reference.bin.gz', root).href;
+
+const cpuModule = new URL('demo/js/nn/cpu.js', root).href;
+
+const workerSource = `
+import { CPU_KERNELS, loadPolicy, parseNetwork } from '${engine}';
+import { createCpuBackend } from '${cpuModule}';
+import { loadContainer } from '${containers}';
+
+const say = (text) => self.postMessage({ progress: text });
+const maxAbs = (a, b) => { let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; };
+const rows = (ref, key) => {
+  const a = ref.arrays[key]; const [n, w] = a.shape;
+  return Array.from({ length: n }, (_, i) => a.subarray(i * w, (i + 1) * w));
+};
+async function timing(policy, input, count) {
+  const times = [];
+  for (let i = 0; i < count; i++) { const t = performance.now(); await policy.run(input); times.push(performance.now() - t); }
+  times.sort((a, b) => a - b);
+  return { median: times[Math.floor(times.length / 2)], min: times[0], count };
+}
+
+self.onmessage = async () => {
+  const result = { workerHasGpu: !!(self.navigator && self.navigator.gpu) };
+  try {
+    const ref = await loadContainer('${reference}');
+    const inputs = rows(ref, 'human.input');
+    const expected = rows(ref, 'human.expected');
+
+    say('cpu: loading');
+    let t = performance.now();
+    const cpu = await loadPolicy('${assets}human.bin.gz', { backend: 'cpu' });
+    result.cpuLoadMs = performance.now() - t;
+    const cpuOut = [];
+    for (const x of inputs) cpuOut.push(await cpu.run(x));
+    result.cpuVsRef = Math.max(...cpuOut.map((o, i) => maxAbs(o, expected[i])));
+    result.cpuTiming = await timing(cpu, inputs[0], 10);
+    result.cpuKernel = cpu.info.cpuKernel;
+    result.cpuRace = cpu.info.cpuRace;
+    say('cpu: ' + JSON.stringify(result.cpuTiming) + ', kernel ' + result.cpuKernel + ' ' + JSON.stringify(result.cpuRace));
+
+    // Both int8 kernels must give the same float32 bits in this engine too.
+    const net = parseNetwork(await loadContainer('${assets}human.bin.gz'));
+    const kernels = CPU_KERNELS.map((kernel) => createCpuBackend(net, { kernel }));
+    result.kernelBitsDiffer = 0;
+    for (const x of inputs) {
+      const [a, b] = kernels.map((k) => new Uint32Array(k.runSync(x).buffer));
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) result.kernelBitsDiffer += 1;
+    }
+
+    say('webgpu: loading and self-test');
+    t = performance.now();
+    const gpu = await loadPolicy('${assets}human.bin.gz', { backend: 'webgpu' });
+    result.gpuLoadMs = performance.now() - t;
+    result.gpuInfo = gpu.info;
+    let vsCpu = 0, vsRef = 0;
+    for (let i = 0; i < inputs.length; i++) {
+      const out = await gpu.run(inputs[i]);
+      vsCpu = Math.max(vsCpu, maxAbs(out, cpuOut[i]));
+      vsRef = Math.max(vsRef, maxAbs(out, expected[i]));
+    }
+    result.gpuVsCpu = vsCpu;
+    result.gpuVsRef = vsRef;
+    result.gpuTiming = await timing(gpu, inputs[0], 10);
+    say('webgpu: ' + JSON.stringify(result.gpuTiming));
+    gpu.dispose();
+
+    say('auto: loading');
+    const auto = await loadPolicy('${assets}human.bin.gz', { backend: 'auto' });
+    result.auto = { backend: auto.backend, reason: auto.info.reason };
+    auto.dispose();
+
+    const osl = await loadPolicy('${assets}osl.bin.gz', { backend: 'auto' });
+    const oslIn = rows(ref, 'osl.input'), oslExp = rows(ref, 'osl.expected');
+    let oslWorst = 0;
+    for (let i = 0; i < oslIn.length; i++) oslWorst = Math.max(oslWorst, maxAbs(await osl.run(oslIn[i]), oslExp[i]));
+    result.osl = { backend: osl.backend, vsRef: oslWorst, timing: await timing(osl, oslIn[0], 50) };
+    osl.dispose();
+    cpu.dispose();
+  } catch (error) {
+    result.error = String(error && error.stack || error);
+  }
+  self.postMessage({ result });
+};
+`;
+
+const log = document.getElementById('log');
+const lines = [];
+const print = (text) => { lines.push(text); log.textContent = lines.join('\n'); console.log(text); };
+const worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })), { type: 'module' });
+worker.onerror = (event) => {
+  window.nnResult = { error: `worker error: ${event.message}` };
+  print(window.nnResult.error);
+};
+worker.onmessage = ({ data }) => {
+  if (data.progress) return print(data.progress);
+  window.nnResult = data.result;
+  print(JSON.stringify(data.result, null, 1));
+  worker.terminate();
+};
+worker.postMessage('start');
+</script>
+</body>
+</html>

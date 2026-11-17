@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Render pose test</title>
+<!--
+  Render test for demo/js/render/{frame,scene}.js, driven by render_shots.test.mjs.
+  Serve the folder that holds both duetmimic.github.io and osl_deploy, then open
+  /duetmimic.github.io/tools/test/render_pose.html?pose=stride
+  Query: pose=idle|stride|key (traces/render_poses.json; key = keyframe 0),
+  model=bundle (default, the original bundle model.mjb) | slim (physics.mjb.gz),
+  view=azimuth,elevation,distance (degrees, degrees, metres; absolute).
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #f4f4f2; overflow: hidden; }
+  #viewport { position: fixed; inset: 0; }
+  #status { position: fixed; left: 8px; bottom: 6px; font: 12px/1.4 system-ui, sans-serif; color: #555; }
+</style>
+<script type="importmap">
+  { "imports": { "three": "../../demo/vendor/three/three.module.js",
+                 "three/addons/": "../../demo/vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="viewport"></div>
+<div id="status">loading</div>
+<script type="module">
+import { loadMujoco, modelFromBytes } from '../../demo/js/lib/mujoco.js';
+import { fetchBytes, loadContainer, loadJSON } from '../../demo/js/lib/container.js';
+import { FrameExtractor } from '../../demo/js/render/frame.js';
+import { DemoRenderer } from '../../demo/js/render/scene.js';
+
+const params = new URLSearchParams(location.search);
+const status = document.getElementById('status');
+const say = (text) => { status.textContent = text; };
+const ASSETS = new URL('../../demo/assets/r2/', location.href);
+const MODELS = {
+  bundle: new URL('../../../osl_deploy/bundles/stage2_R2_model_6898/model.mjb', location.href),
+  slim: new URL('physics.mjb.gz', ASSETS),
+};
+
+async function main() {
+  const t0 = performance.now();
+  const [demo, mujoco] = await Promise.all([loadJSON(new URL('demo.json', ASSETS)), loadMujoco()]);
+  const container = await loadContainer(new URL(demo.visual.file, ASSETS));
+  const fixture = await loadJSON(new URL('../traces/render_poses.json', location.href)).catch(() => null);
+  say('loading model');
+  const which = params.get('model') || 'bundle';
+  const tModel = performance.now();
+  const { model, data } = modelFromBytes(mujoco, await fetchBytes(MODELS[which]));
+  const modelSeconds = (performance.now() - tModel) / 1000;
+
+  // ?opts={...} overrides DemoRenderer options; ?look={...} overrides demo.visual keys (tuning).
+  const opts = JSON.parse(params.get('opts') || '{}');
+  const visual = { ...demo.visual, ...JSON.parse(params.get('look') || '{}') };
+  const view = new DemoRenderer(document.getElementById('viewport'), visual, container, { preserveDrawingBuffer: true, ...opts });
+  const extractor = new FrameExtractor(mujoco, model, demo.visual);
+
+  function pose(name) {
+    if (name === 'key' || !fixture) {
+      mujoco.mj_resetDataKeyframe(model, data, 0);
+      data.act.fill(0.1);
+    } else {
+      const p = fixture.poses[name];
+      if (!p) throw new Error(`no pose ${name}`);
+      data.qpos.set(p.qpos);
+      data.qvel.fill(0);
+      data.act.set(p.act);
+    }
+    mujoco.mj_forward(model, data);
+    const { frame } = extractor.extract(data);
+    view.setFrame(frame);
+    view.resetView();
+    view.render();
+    return { segments: frame.segmentCount, heading: frame.root[3], root: Array.from(frame.root.subarray(0, 3)) };
+  }
+
+  function shot({ pose: name = 'stride', azimuth, elevation, distance, mode = 'follow' } = {}) {
+    const info = pose(name);
+    view.setCameraMode(mode);
+    if (azimuth !== undefined) view.setView({ azimuth, elevation, distance });
+    for (let i = 0; i < 3; i++) view.render();
+    return { ...info, ...view.stats };
+  }
+
+  // The fixture pose moved by (dx, dy) and turned by yaw degrees about z, fed
+  // to the renderer as a new frame (no view reset): a walker on the move.
+  function move(name, dx = 0, dy = 0, yawDeg = 0) {
+    const p = fixture.poses[name];
+    data.qpos.set(p.qpos);
+    data.qpos[0] += dx;
+    data.qpos[1] += dy;
+    const h = yawDeg * Math.PI / 360, c = Math.cos(h), s = Math.sin(h);
+    const [w, x, y, z] = [data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]];
+    data.qpos[3] = c * w - s * z; data.qpos[4] = c * x - s * y;
+    data.qpos[5] = c * y + s * x; data.qpos[6] = c * z + s * w;
+    data.qvel.fill(0);
+    data.act.set(p.act);
+    mujoco.mj_forward(model, data);
+    const { frame } = extractor.extract(data);
+    view.setFrame(frame);
+    return Array.from(frame.root);
+  }
+
+  // Camera modes with explicit time steps: follow tracks a moved walker and keeps
+  // the orbit offset, chase swings behind a turned walker, free stays put.
+  function cameraChecks() {
+    const off = [0, 0, -0.05];
+    const target = () => view.controls.target.clone();
+    const offset = () => view.camera.position.clone().sub(view.controls.target);
+    pose('stride');
+    view.setCameraMode('follow');
+    const offset0 = offset();
+    const root = move('stride', 2.0, 0.5, 0);
+    for (let i = 0; i < 80; i++) view.update(0.05);
+    const t = target();
+    const follow = Math.hypot(t.x - root[0] - off[0], t.y - root[1] - off[1], t.z - root[2] - off[2]);
+    const offsetDrift = offset().sub(offset0).length();
+
+    view.setCameraMode('chase');
+    const turned = move('stride', 2.0, 0.5, 90);
+    for (let i = 0; i < 160; i++) view.update(0.05);
+    const o = offset();
+    let rel = Math.atan2(o.y, o.x) - turned[3];
+    rel = Math.atan2(Math.sin(rel), Math.cos(rel)) * 180 / Math.PI;
+    const chaseError = Math.abs(rel - view.options.chaseAzimuth);
+
+    view.setCameraMode('free');
+    const before = target();
+    const far = move('stride', 4.0, 0.5, 90);
+    for (let i = 0; i < 40; i++) view.update(0.05);
+    const freeDrift = target().sub(before).length();
+    const lt = view.keyLight.target.position;
+    const lightLag = Math.hypot(lt.x - far[0] - off[0], lt.y - far[1] - off[1]);
+    view.setCameraMode('follow');
+    view.render();
+    return { follow, offsetDrift, chaseError, freeDrift, lightLag };
+  }
+
+  // Wall time per render(), each followed by a 1-pixel readPixels so the GPU
+  // work is finished (software GL in headless runs: a bound, not a laptop figure).
+  function timing(frames = 30) {
+    const gl = view.renderer.getContext();
+    const px = new Uint8Array(4);
+    const sync = () => gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    view.render(); sync();
+    const t = performance.now();
+    for (let i = 0; i < frames; i++) { view.render(); sync(); }
+    return (performance.now() - t) / frames;
+  }
+
+  const gl = view.renderer.getContext();
+  const debug = gl.getExtension('WEBGL_debug_renderer_info');
+  const glRenderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+
+  const first = params.get('pose') || 'stride';
+  const v = (params.get('view') || '').split(',').filter(Boolean).map(Number);
+  const info = shot(v.length === 3 ? { pose: first, azimuth: v[0], elevation: v[1], distance: v[2] } : { pose: first });
+  window.renderTest = { shot, pose, move, cameraChecks, timing, view, extractor, glRenderer, modelSeconds, loadSeconds: (performance.now() - t0) / 1000 };
+  say(`${which} model ${modelSeconds.toFixed(1)} s, ${info.triangles} triangles, ${info.calls} calls, ${info.segments} muscle segments, ${glRenderer}`);
+  window.renderReady = true;
+}
+
+main().catch((e) => { say(`error: ${e.message}`); window.renderError = String(e.stack || e); console.error(e); });
+</script>
+</body>
+</html>

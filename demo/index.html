@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en" data-phase="loading">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DuetMimic interactive demo · Steer a musculoskeletal human with a prosthetic leg</title>
+<meta name="description" content="Pilot the DuetMimic musculoskeletal human–prosthesis model with your keyboard. MuJoCo physics and both policies run in your browser.">
+<meta name="theme-color" content="#f2f2f5">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="DuetMimic">
+<meta property="og:title" content="DuetMimic · Interactive demo">
+<meta property="og:description" content="Steer a musculoskeletal human walking with an Open-Source Leg prosthesis. MuJoCo physics and both control policies run live in your browser.">
+<meta property="og:url" content="https://duetmimic.github.io/demo/">
+<meta property="og:image" content="https://duetmimic.github.io/static/media/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="A musculoskeletal human model walking with an orange Open-Source Leg prosthesis.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../static/img/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="../static/img/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="css/demo.css">
+<script>
+  // Page shell, run before first paint. js/app.js owns everything else.
+  //  - ?embed=1 (the iframe on the project page) adds html.embed: #back-link
+  //    and the error overlay's link to the project page are hidden.
+  //  - html.touch on a coarse pointer (phones, tablets): the touch pad shows
+  //    and the help speaks of it; app.js also sets it on the first touch.
+  //  - html[data-phase]: loading | ready | running | failed, kept by app.js.
+  //  - html.no-focus while this page lacks keyboard focus; when embedded,
+  //    #focus-hint then asks for a click.
+  //  - duetShellFailed() marks the loader failed if js/app.js, or a module it
+  //    imports, cannot be fetched.
+  (function () {
+    var root = document.documentElement;
+    var embed = new URLSearchParams(location.search).get('embed');
+    if (embed !== null && embed !== '0' && embed !== 'false') root.classList.add('embed');
+    if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) root.classList.add('touch');
+
+    function syncFocus() { root.classList.toggle('no-focus', !document.hasFocus()); }
+    window.addEventListener('focus', syncFocus);
+    window.addEventListener('blur', syncFocus);
+    document.addEventListener('DOMContentLoaded', syncFocus);
+
+    window.duetShellFailed = function (message) {
+      var loader = document.getElementById('loader');
+      var status = document.getElementById('loader-status');
+      if (loader) loader.classList.add('is-failed');
+      if (status) status.textContent = message ||
+        'The demo code could not be loaded. Check your connection, then reload the page.';
+    };
+  })();
+</script>
+</head>
+<body>
+
+<!-- Renderer host: js/app.js mounts the three.js canvas here. -->
+<div id="viewport"></div>
+
+<a id="back-link" class="panel" href="../">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>
+  DuetMimic
+</a>
+
+<!-- In-simulation chrome: top bar (command + buttons) and status readouts.
+     inert (dimmed, no pointer) until app.js starts the simulation. -->
+<div id="hud" inert>
+  <div class="topbar panel">
+    <!-- app.js: textContent = command label; data-state="moving" lights the dot,
+         data-shaping="start|reverse" (a walk held back) rings it instead. -->
+    <span id="hud-command" class="command-pill" data-state="idle" data-shaping="" title="Current command">Stand</span>
+    <span class="topbar-sep" aria-hidden="true"></span>
+    <!-- app.js: aria-pressed="true" while paused (swaps the icon). -->
+    <button id="btn-pause" class="tool" type="button" aria-pressed="false" aria-label="Pause" title="Pause (Space)">
+      <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.5v11M15 6.5v11"/></svg>
+      <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8.5 5.8v12.4L18.5 12z"/></svg>
+    </button>
+    <button id="btn-reset" class="tool tool-text" type="button" title="Reset (R)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4.5v4.2h4.2"/></svg>
+      Reset
+    </button>
+    <!-- app.js: data-mode = the renderer's camera mode ("follow" | "chase" | "free"). -->
+    <button id="btn-camera" class="tool" type="button" data-mode="follow" aria-label="Change camera" title="Change camera (C)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="12.5" height="10" rx="2.5"/><path d="m15.5 10.6 5-2.9v8.6l-5-2.9z"/></svg>
+    </button>
+    <!-- app.js: toggles #help (hidden) and aria-expanded. -->
+    <button id="btn-help" class="tool" type="button" aria-expanded="true" aria-controls="help" aria-label="How to play" title="How to play (H)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M9.7 9.6a2.4 2.4 0 0 1 4.7.6c0 1.6-2.4 2-2.4 3.6"/><path d="M12 16.9h.01"/></svg>
+    </button>
+  </div>
+
+  <dl class="stats panel" aria-label="Simulation status">
+    <div><dt>Speed</dt><dd id="hud-speed">–</dd></div>
+    <!-- Developer rows: app.js shows them with ?debug=1. -->
+    <div data-debug hidden><dt>Gait clip</dt><dd id="hud-clip">–</dd></div>
+    <div data-debug hidden><dt>Sim time</dt><dd id="hud-time">–</dd></div>
+    <div><dt>Real time</dt><dd id="hud-rtf">–</dd></div>
+    <div><dt>Inference</dt><dd id="hud-backend">–</dd></div>
+    <!-- app.js: shown while the human network runs on the CPU, worded by why. -->
+    <div id="hud-note" class="stats-note" hidden><dt>Note</dt><dd>The networks run on the CPU here, so the demo may run slower than real time.</dd></div>
+  </dl>
+</div>
+
+<!-- Controls, as bound in demo.json "ui" (bindings use KeyboardEvent.code).
+     Each kbd's data-key lists the codes that light it, space-separated: while
+     one is held, app.js adds class "pressed" to kbd[data-key~="<code>"].
+     data-label="<code>": app.js writes what the visitor's keyboard layout
+     prints at that key (AZERTY: Z for KeyW). Checked against demo.json "ui" on
+     2026-11-16; keep them in step if the bindings change. Q and E (slower,
+     faster) stay bound but are not listed.
+     app.js shows the panel after Start: data-mode="full", or "compact" (the
+     one-line legend) when embedded; H, ? and #btn-help switch between them.
+     On touch screens (html.touch) it starts hidden and the touch rows replace
+     the keys. -->
+<aside id="help" class="panel" aria-labelledby="help-title" data-mode="full" hidden>
+  <h2 id="help-title">How to play</h2>
+  <dl class="key-grid">
+    <div><dt><kbd data-key="KeyW ArrowUp" data-label="KeyW">W</kbd></dt><dd>Walk forward</dd></div>
+    <div><dt><kbd data-key="KeyS ArrowDown" data-label="KeyS">S</kbd></dt><dd>Walk backward</dd></div>
+    <div><dt><kbd data-key="KeyA ArrowLeft" data-label="KeyA">A</kbd><kbd data-key="KeyD ArrowRight" data-label="KeyD">D</kbd></dt><dd>Turn left / right</dd></div>
+    <div class="wide"><dt><kbd data-key="Digit1">1</kbd><kbd data-key="Digit2">2</kbd><kbd data-key="Digit3">3</kbd><kbd data-key="Digit4">4</kbd><kbd data-key="Digit5">5</kbd></dt><dd>Speed level</dd></div>
+    <div><dt><kbd data-key="ShiftLeft ShiftRight">Shift</kbd></dt><dd>Hold for top speed</dd></div>
+    <div><dt><kbd data-key="Space">Space</kbd></dt><dd>Pause</dd></div>
+    <div><dt><kbd data-key="KeyR" data-label="KeyR">R</kbd></dt><dd>Reset</dd></div>
+    <div><dt><kbd data-key="KeyC" data-label="KeyC">C</kbd></dt><dd>Change camera</dd></div>
+  </dl>
+  <dl class="touch-grid">
+    <div><dt><span class="pad-key">&#x25B2;</span><span class="pad-key">&#x25BC;</span></dt><dd>Hold to walk</dd></div>
+    <div><dt><span class="pad-key">&#x25C0;&#xFE0E;</span><span class="pad-key">&#x25B6;&#xFE0E;</span></dt><dd>Hold to turn</dd></div>
+    <div><dt><span class="pad-key">Fast</span></dt><dd>Top speed</dd></div>
+  </dl>
+  <p class="help-notes">
+    <span class="for-keys">Arrow keys steer too; <span data-label="KeyH">H</span> toggles this panel.</span>
+    <span class="for-keys">Drag to orbit, <span class="zoom-page">scroll to zoom.</span><span class="zoom-embed"><span data-zoom-key>Ctrl</span> + scroll to zoom.</span></span>
+    <span class="for-touch">Drag to orbit, pinch to zoom.</span>
+    <span>Muscle colour: pale = relaxed, deep red = active.</span>
+  </p>
+  <!-- One-line legend: the embedded help, and very short windows. -->
+  <p class="help-compact"><b data-label="KeyW">W</b>/<b data-label="KeyS">S</b> walk · <b data-label="KeyA">A</b>/<b data-label="KeyD">D</b> turn · <b>1</b>–<b>5</b> speed · <b>Space</b> pause · <b data-label="KeyR">R</b> reset · <b data-label="KeyC">C</b> camera · <b data-label="KeyH">H</b> help</p>
+</aside>
+
+<!-- Touch steering, shown on touch screens (html.touch). Each arrow holds the
+     movement key in data-code (a KeyboardEvent.code, as the keyboard sends it)
+     while pressed; Fast toggles top speed (aria-pressed). The first press on
+     the ready screen starts the demo. app.js wires both. -->
+<div id="touch-pad" role="group" aria-label="Steering">
+  <button type="button" class="pad-btn pad-up" data-code="KeyW" tabindex="-1" aria-label="Walk forward">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M12 6.2 18.6 16.3H5.4z"/></svg>
+  </button>
+  <button type="button" class="pad-btn pad-left" data-code="KeyA" tabindex="-1" aria-label="Turn left">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M6.2 12 16.3 5.4v13.2z"/></svg>
+  </button>
+  <button type="button" class="pad-btn pad-down" data-code="KeyS" tabindex="-1" aria-label="Walk backward">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M12 17.8 5.4 7.7h13.2z"/></svg>
+  </button>
+  <button type="button" class="pad-btn pad-right" data-code="KeyD" tabindex="-1" aria-label="Turn right">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M17.8 12 7.7 18.6V5.4z"/></svg>
+  </button>
+  <button type="button" id="pad-fast" class="pad-btn pad-fast" tabindex="-1" aria-pressed="false" aria-label="Top speed">Fast</button>
+</div>
+
+<!-- app.js: set textContent, add class "show"; remove it to fade out. -->
+<div id="toast" role="status" aria-live="polite"></div>
+
+<!-- Loading overlay, visible until app.js hides it (hidden attribute or
+     class "is-done"). #loader-bar is the fill: set style.width in %. Without
+     an inline width it shows an indeterminate sweep. #start-btn starts
+     disabled; enable it when ready. -->
+<div id="loader">
+  <div class="loader-card panel">
+    <p class="loader-kicker">Interactive demo</p>
+    <h1 id="loader-title">DuetMimic</h1>
+    <p id="loader-status" aria-live="polite">Loading…</p>
+    <div class="loader-track" aria-hidden="true"><div id="loader-bar"></div></div>
+    <!-- app.js replaces this with the size from demo.json (31.2 MB on 2026-11-16)
+         and hides it once the status line counts the download. -->
+    <p id="loader-size">About 31 MB download</p>
+    <button id="start-btn" type="button" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8.5 5.8v12.4L18.5 12z"/></svg>
+      Start
+    </button>
+  </div>
+</div>
+
+<!-- Error overlay: app.js sets #error-text and removes hidden. -->
+<div id="error" role="alert" hidden>
+  <div class="error-card">
+    <svg class="error-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.8 2.8 19.5h18.4z"/><path d="M12 10v4.2M12 16.9h.01"/></svg>
+    <h2>The demo stopped</h2>
+    <p id="error-text">Something went wrong.</p>
+    <div class="error-actions">
+      <a class="btn btn-dark" href="">Reload</a>
+      <a class="btn to-site" href="../">Project page</a>
+    </div>
+  </div>
+</div>
+
+<!-- Shown by CSS when embedded (html.embed) and unfocused (html.no-focus),
+     except on touch screens. -->
+<div id="focus-hint" aria-hidden="true">
+  <svg viewBox="0 0 24 24"><path d="M6 3.5 18.5 10l-5.4 1.9-2.3 5.6z"/><path d="m13.2 12 4.6 4.6"/></svg>
+  Click to use the keyboard
+</div>
+
+<noscript><div class="noscript">This demo needs JavaScript.</div></noscript>
+
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }
+</script>
+<script nomodule>duetShellFailed('This browser is too old for the demo. Try a recent Chrome, Edge, Firefox or Safari.');</script>
+<script type="module" src="js/app.js" onerror="duetShellFailed()"></script>
+</body>
+</html>

@@ -1,0 +1,867 @@
+/* DuetMimic demo page: a full-window viewport with glass panels on top.
+   Light theme, matching the project page. Layers: viewport 0, panels and the
+   touch pad 10, toast 20, focus hint 25, loader 30, error 40. */
+
+:root {
+  --ink: #1d1d1f;
+  --ink-2: #3a3a3c;
+  --muted: #6e6e73;
+  --faint: #8e8e93;
+  --line: rgba(0, 0, 0, 0.08);
+  --line-strong: #d2d2d7;
+  --accent: #f26a1b;
+  --accent-strong: #c2410c;
+  --danger: #b42318;
+  --glass: rgba(255, 255, 255, 0.74);
+  --glass-dense: rgba(253, 253, 254, 0.9);
+  --glass-blur: saturate(170%) blur(20px);
+  --glass-edge: 0 0 0 0.5px rgba(0, 0, 0, 0.1);
+  --lift: 0 12px 32px -10px rgba(15, 23, 42, 0.22), 0 2px 6px rgba(15, 23, 42, 0.06);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --text: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --edge: 16px;
+  --pad-top: max(var(--edge), env(safe-area-inset-top));
+  --pad-right: max(var(--edge), env(safe-area-inset-right));
+  --pad-bottom: max(var(--edge), env(safe-area-inset-bottom));
+  --pad-left: max(var(--edge), env(safe-area-inset-left));
+  --back-h: 38px;
+  --key-size: 52px;   /* touch pad buttons */
+  --key-gap: 6px;
+  --pad-width: calc(3 * var(--key-size) + 2 * var(--key-gap));
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* Embedded: a wheel or swipe the demo does not use scrolls the project page. */
+html.embed, .embed body { overscroll-behavior: auto; }
+
+body {
+  background: #ececf0;
+  color: var(--ink);
+  font: 400 14px/1.45 var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+
+svg { flex: none; }
+svg .fill { fill: currentColor; stroke: none; }
+
+.panel {
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-edge), var(--lift);
+}
+
+/* ------------------------------------------------------------- viewport */
+
+/* A soft studio backdrop; the renderer's canvas covers it once mounted. */
+#viewport {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% 28%, #fbfbfd 0%, #f1f1f4 52%, #e3e3e8 100%);
+}
+
+#viewport canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  touch-action: none;
+}
+
+/* ------------------------------------------------------------ back link */
+
+#back-link {
+  position: fixed;
+  z-index: 10;
+  top: var(--pad-top);
+  left: var(--pad-left);
+  height: var(--back-h);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 15px 0 9px;
+  border-radius: 999px;
+  font: 600 13.5px/1 var(--text);
+  color: var(--ink);
+  text-decoration: none;
+  transition: background-color 0.2s var(--ease);
+}
+
+#back-link svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#back-link:hover { background: rgba(255, 255, 255, 0.92); }
+.embed #back-link { display: none; }
+
+/* ------------------------------------------------------------------ HUD */
+
+#hud {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;   /* the canvas keeps the pointer between panels */
+  transition: opacity 0.3s var(--ease);
+}
+
+#hud[hidden] { display: none; }
+#hud > * { pointer-events: auto; }
+
+/* Until Start (app.js removes inert): dimmed, and nothing to press. */
+#hud[inert] { opacity: 0.4; }
+#hud[inert] > * { pointer-events: none; }
+
+.topbar {
+  position: absolute;
+  top: var(--pad-top);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 2 * var(--edge));
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  border-radius: 999px;
+}
+
+.command-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  width: 264px;
+  height: 36px;
+  padding: 0 16px 0 13px;
+  overflow: hidden;
+  border-radius: 999px;
+  font: 600 14px/1 var(--text);
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.command-pill::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+  transition: background-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+
+.command-pill[data-state="moving"]::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(242, 106, 27, 0.2);
+}
+
+/* 'Starting…' / 'Stopping…': the session holds the walk back for a moment. */
+.command-pill[data-shaping="start"]::before,
+.command-pill[data-shaping="reverse"]::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--accent);
+  animation: pill-wait 0.7s ease-in-out infinite alternate;
+}
+
+@keyframes pill-wait {
+  to { opacity: 0.35; }
+}
+
+.topbar-sep {
+  flex: none;
+  width: 1px;
+  height: 22px;
+  margin: 0 6px;
+  background: var(--line-strong);
+}
+
+.tool {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background-color 0.2s var(--ease), color 0.2s var(--ease);
+}
+
+.tool svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool:hover { background: rgba(0, 0, 0, 0.06); }
+.tool:active { background: rgba(0, 0, 0, 0.1); }
+
+.tool-text {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px 0 11px;
+  font: 600 13.5px/1 var(--text);
+}
+
+.tool-text svg { width: 17px; height: 17px; }
+
+#btn-pause svg { stroke-width: 2.4; }
+#btn-pause .i-play { display: none; }
+#btn-pause[aria-pressed="true"] .i-play { display: block; }
+#btn-pause[aria-pressed="true"] .i-pause { display: none; }
+#btn-pause[aria-pressed="true"],
+#btn-help[aria-expanded="true"] { background: rgba(0, 0, 0, 0.07); }
+
+.stats {
+  position: absolute;
+  top: calc(var(--pad-top) + var(--back-h) + 10px);
+  left: var(--pad-left);
+  min-width: 264px; /* fits the longest readouts, so the panel keeps its width */
+  margin: 0;
+  padding: 11px 15px 12px;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 5px 18px;
+  border-radius: 14px;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.embed .stats { top: var(--pad-top); }
+
+/* Below 1100px the centred top bar reaches the top-left corner. */
+@media (max-width: 1099px) {
+  .stats, .embed .stats { top: auto; bottom: var(--pad-bottom); }
+}
+
+.stats div { display: contents; }
+.stats > div[hidden] { display: none; }
+.stats dt { color: var(--muted); }
+
+.stats dd {
+  margin: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 12px/1.35 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* The CPU-inference note: a full-width row that wraps inside the panel
+   (inline-size containment keeps it from widening the panel). */
+.stats .stats-note {
+  display: block;
+  grid-column: 1 / -1;
+  contain: inline-size;
+  margin-top: 3px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+
+.stats .stats-note[hidden] { display: none; }
+
+.stats .stats-note dt {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.stats .stats-note dd {
+  max-width: none;
+  text-align: left;
+  white-space: normal;
+  font: 400 11.5px/1.4 var(--text);
+  color: var(--muted);
+}
+
+/* ----------------------------------------------------------- how to play */
+
+#help {
+  position: fixed;
+  z-index: 10;
+  right: var(--pad-right);
+  bottom: var(--pad-bottom);
+  width: 300px;
+  padding: 15px 16px 13px;
+  border-radius: 16px;
+}
+
+#help[hidden] { display: none; }
+
+#help h2 {
+  margin: 0 0 11px;
+  font: 700 14.5px/1.2 var(--text);
+  letter-spacing: -0.01em;
+}
+
+.key-grid { display: grid; }
+
+.key-grid > div { display: contents; }
+
+.key-grid > .wide {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.key-grid dt { display: flex; gap: 4px; }
+.key-grid .wide dt { gap: 3px; }
+.key-grid .wide kbd { min-width: 22px; padding: 0 5px; }
+
+.key-grid dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 25px;
+  height: 25px;
+  padding: 0 7px;
+  font: 600 11.5px/1 var(--text);
+  color: var(--ink);
+  background: linear-gradient(#ffffff, #f4f4f6);
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 7px;
+  transition: background 0.08s linear, color 0.08s linear, border-color 0.08s linear, transform 0.08s linear;
+}
+
+kbd.pressed {
+  color: #fff;
+  background: var(--accent-strong);
+  border-color: #9a3412;
+  border-bottom-width: 1px;
+  transform: translateY(1px);
+}
+
+.help-notes {
+  margin: 11px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.help-notes > span { display: block; }
+.zoom-embed, .embed .zoom-page { display: none; }
+.embed .zoom-embed { display: inline; }
+
+/* Touch screens: the pad's rows instead of the keys. */
+.touch-grid { display: none; }
+
+.touch-grid,
+.key-grid {
+  margin: 0;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 7px 14px;
+}
+
+.touch-grid > div { display: contents; }
+.touch-grid dt { display: flex; gap: 4px; }
+.touch-grid dd { margin: 0; font-size: 13px; color: var(--ink-2); }
+
+.pad-key {
+  display: inline-grid;
+  place-items: center;
+  min-width: 25px;
+  height: 25px;
+  padding: 0 6px;
+  border-radius: 7px;
+  font: 600 11px/1 var(--text);
+  color: var(--ink);
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.touch #help .key-grid { display: none; }
+.touch #help .touch-grid { display: grid; }
+html:not(.touch) .help-notes > .for-touch,
+.touch .help-notes > .for-keys { display: none; }
+
+.help-compact { display: none; }
+.help-compact b { font-weight: 650; color: var(--ink); }
+
+/* data-mode="compact" (the embedded help): only the one-line legend. */
+#help[data-mode="compact"] {
+  left: auto;
+  width: auto;
+  max-width: calc(100% - 2 * var(--edge));
+  padding: 8px 12px;
+  border-radius: 12px;
+}
+
+#help[data-mode="compact"] > :not(.help-compact) { display: none; }
+
+#help[data-mode="compact"] .help-compact {
+  display: block;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+/* With the touch pad the help keeps to the right of it, and no key legend. */
+.touch #help {
+  left: auto;
+  max-width: calc(100% - var(--pad-width) - 3 * var(--edge));
+}
+
+.touch #help .help-compact { display: none; }
+
+/* ------------------------------------------------------------- touch pad */
+
+#touch-pad {
+  position: fixed;
+  z-index: 10;
+  left: var(--pad-left);
+  bottom: var(--pad-bottom);
+  display: none;
+  grid-template-columns: repeat(3, var(--key-size));
+  grid-template-rows: repeat(2, var(--key-size));
+  grid-template-areas: ". up fast" "left down right";
+  gap: var(--key-gap);
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  transition: opacity 0.3s var(--ease);
+}
+
+.touch #touch-pad { display: grid; }
+html[data-phase="loading"] #touch-pad { opacity: 0.4; pointer-events: none; }
+html[data-phase="failed"] #touch-pad { display: none; }
+
+.pad-btn {
+  display: grid;
+  place-items: center;
+  width: var(--key-size);
+  height: var(--key-size);
+  padding: 0;
+  border: 0;
+  border-radius: 16px;
+  color: var(--ink);
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-edge), var(--lift);
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+  transition: background-color 0.08s linear, color 0.08s linear, transform 0.08s linear;
+}
+
+.pad-btn svg { width: 22px; height: 22px; }
+.pad-up { grid-area: up; }
+.pad-left { grid-area: left; }
+.pad-down { grid-area: down; }
+.pad-right { grid-area: right; }
+.pad-fast { grid-area: fast; font: 650 12.5px/1 var(--text); letter-spacing: 0.01em; }
+
+.pad-btn.pressed,
+.pad-fast[aria-pressed="true"] {
+  color: #fff;
+  background: var(--accent-strong);
+}
+
+.pad-btn.pressed { transform: scale(0.96); }
+
+/* ---------------------------------------------------------------- toast */
+
+/* A pill for one line (18px is half its height), a rounded box for more. */
+#toast {
+  position: fixed;
+  z-index: 20;
+  top: calc(var(--pad-top) + 60px);
+  left: 50%;
+  width: max-content;  /* left: 50% alone would wrap it at half the width */
+  max-width: min(520px, calc(100% - 2 * var(--edge)));
+  padding: 9px 16px;
+  border-radius: 18px;
+  text-align: center;
+  font: 500 13.5px/1.25 var(--text);
+  color: #fff;
+  background: rgba(29, 29, 31, 0.88);
+  box-shadow: 0 8px 22px -8px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, -6px);
+  transition: opacity 0.25s var(--ease), transform 0.25s var(--ease);
+}
+
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* -------------------------------------------------------------- loader */
+
+#loader {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  pointer-events: none;
+  transition: opacity 0.45s var(--ease), visibility 0.45s;
+}
+
+/* Wide windows: the card docks left, clear of the walker in the middle
+   (24px from the edge at 900px, up to 112px on wide screens). */
+@media (min-width: 900px) {
+  #loader { place-items: center start; padding-left: clamp(24px, 12vw - 84px, 112px); }
+  .loader-card { width: min(340px, 100%); }
+}
+
+#loader[hidden] { display: none; }
+#loader.is-done { opacity: 0; visibility: hidden; }
+
+.loader-card {
+  width: min(360px, 100%);
+  padding: 26px 28px 24px;
+  border-radius: 22px;
+  text-align: center;
+  background: var(--glass-dense);
+  pointer-events: auto;
+}
+
+.loader-kicker {
+  margin: 0 0 8px;
+  font: 600 11.5px/1 var(--text);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+}
+
+#loader-title {
+  margin: 0;
+  font: 700 28px/1.1 var(--text);
+  letter-spacing: -0.035em;
+}
+
+#loader-status {
+  min-height: 1.45em;
+  margin: 14px 0 12px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.loader-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+#loader-bar {
+  width: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.25s var(--ease);
+}
+
+#loader-bar:not([style*="width"]) {
+  width: 32%;
+  animation: sweep 1.5s ease-in-out infinite;
+}
+
+@keyframes sweep {
+  from { transform: translateX(-105%); }
+  to { transform: translateX(320%); }
+}
+
+#loader-size {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+#start-btn {
+  margin-top: 18px;
+  height: 46px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 26px 0 20px;
+  border: 0;
+  border-radius: 999px;
+  font: 600 15.5px/1 var(--text);
+  color: #fff;
+  background: var(--ink);
+  box-shadow: 0 10px 24px -10px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+  transition: background-color 0.2s var(--ease), color 0.2s var(--ease), box-shadow 0.2s var(--ease), transform 0.2s var(--ease);
+}
+
+#start-btn svg { width: 18px; height: 18px; color: var(--accent); }
+#start-btn:hover:not(:disabled) { background: #000; transform: translateY(-1px); }
+#start-btn[hidden] { display: none; }
+
+#start-btn:disabled {
+  cursor: default;
+  color: var(--faint);
+  background: rgba(0, 0, 0, 0.06);
+  box-shadow: none;
+}
+
+#start-btn:disabled svg { color: currentColor; }
+
+#loader.is-failed #loader-bar { width: 100%; background: var(--danger); animation: none; transform: none; }
+#loader.is-failed #loader-status { color: var(--danger); }
+#loader.is-failed #start-btn { display: none; }
+
+/* ---------------------------------------------------------------- error */
+
+#error {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(236, 236, 240, 0.72);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+#error[hidden] { display: none; }
+
+.error-card {
+  width: min(460px, 100%);
+  padding: 26px 28px 24px;
+  border-radius: 22px;
+  background: #fff;
+  box-shadow: var(--glass-edge), var(--lift);
+}
+
+.error-icon {
+  width: 30px;
+  height: 30px;
+  fill: none;
+  stroke: var(--danger);
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.error-card h2 {
+  margin: 10px 0 0;
+  font: 700 19px/1.25 var(--text);
+  letter-spacing: -0.015em;
+}
+
+#error-text {
+  max-height: 40vh;
+  margin: 8px 0 0;
+  overflow: auto;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.error-actions { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 8px; }
+
+.btn {
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 18px;
+  border-radius: 999px;
+  font: 600 14px/1 var(--text);
+  text-decoration: none;
+  color: var(--ink);
+  background: #fff;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.btn-dark { color: #fff; background: var(--ink); box-shadow: none; }
+.btn-dark:hover { background: #000; }
+.embed .to-site { display: none; }
+
+/* ----------------------------------------------------------- focus hint */
+
+/* Bottom centre, just above the bottom panels: clear of the walker, whose
+   feet the chase camera keeps about a quarter of the height up. */
+#focus-hint {
+  position: fixed;
+  z-index: 25;
+  bottom: calc(var(--pad-bottom) + 48px);
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 16px 0 13px;
+  border-radius: 999px;
+  font: 600 13.5px/1 var(--text);
+  white-space: nowrap;
+  color: #fff;
+  background: rgba(29, 29, 31, 0.86);
+  box-shadow: 0 8px 22px -8px rgba(0, 0, 0, 0.4);
+  pointer-events: none;   /* the click lands on whatever is below and focuses the page */
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-50%) scale(0.96);
+  transition: opacity 0.25s var(--ease), transform 0.25s var(--ease), visibility 0.25s;
+}
+
+#focus-hint svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.embed.no-focus #focus-hint { opacity: 1; visibility: visible; transform: translateX(-50%); }
+.embed.no-focus body:has(#loader:not([hidden]):not(.is-done)) #focus-hint { opacity: 0; visibility: hidden; }
+.touch #focus-hint { display: none; }
+
+.noscript {
+  position: fixed;
+  z-index: 50;
+  inset: auto 16px 16px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  text-align: center;
+  color: #fff;
+  background: var(--ink);
+}
+
+/* ------------------------------------------------------- smaller windows */
+
+/* Short windows, such as the embed on a laptop: the controls take two columns. */
+@media (max-height: 560px) and (min-width: 700px) {
+  #help { width: auto; max-width: calc(100% - 2 * var(--edge)); padding: 12px 15px 11px; }
+  #help h2 { margin-bottom: 9px; font-size: 13.5px; }
+  .key-grid { grid-template-columns: auto auto auto auto; gap: 6px 12px; }
+  .key-grid dd { font-size: 12.5px; padding-right: 8px; }
+  kbd { min-width: 23px; height: 23px; }
+  .help-notes { display: none; }
+}
+
+@media (max-width: 860px) {
+  .stats { display: none; }
+}
+
+/* Touch screens below 1100px: the stats panel would sit where the pad is. */
+@media (max-width: 1099px) {
+  .touch .stats { display: none; }
+}
+
+/* Below 800px the centred top bar would touch the back link: it drops
+   below it (standalone) and the panels tighten. */
+@media (max-width: 800px) {
+  :root { --edge: 12px; --back-h: 36px; }
+  .topbar {
+    top: calc(var(--pad-top) + var(--back-h) + 8px);
+    height: 46px;
+  }
+  .embed .topbar { top: var(--pad-top); }
+  .command-pill { width: auto; min-width: 0; max-width: 46vw; height: 34px; padding: 0 13px 0 11px; font-size: 13px; }
+  .tool { width: 34px; height: 34px; }
+  .tool-text { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; }
+  .tool-text svg { width: 18px; height: 18px; }
+  .topbar-sep { margin: 0 3px; }
+  #toast { top: calc(var(--pad-top) + var(--back-h) + 64px); }
+  .embed #toast { top: calc(var(--pad-top) + 58px); }
+  #help { left: var(--pad-left); width: auto; padding: 12px 14px 11px; }
+  .key-grid { grid-template-columns: auto 1fr auto 1fr; gap: 6px 10px; }
+  .key-grid dd, .touch-grid dd { font-size: 12.5px; }
+  .key-grid .wide kbd { min-width: 20px; padding: 0 4px; }
+  .help-notes { display: none; }
+}
+
+@media (max-width: 420px) {
+  .key-grid { grid-template-columns: auto 1fr; }
+}
+
+/* Short windows (a phone-sized embed, a landscape phone): a one-line legend
+   (on touch screens the pad's rows) and a compact loader card, so nothing
+   covers the top bar. */
+@media (max-height: 460px) {
+  :root { --key-size: 44px; --key-gap: 5px; }
+  #help { left: auto; width: auto; max-width: calc(100% - 2 * var(--edge)); padding: 8px 12px; border-radius: 12px; }
+  .touch #help { max-width: calc(100% - var(--pad-width) - 3 * var(--edge)); }
+  #help > :not(.help-compact) { display: none; }
+  #help .help-compact { display: block; margin: 0; font-size: 12px; line-height: 1.5; color: var(--ink-2); }
+  .touch #help > .touch-grid { display: grid; gap: 5px 10px; }
+  .touch #help > .help-compact { display: none; }
+  .touch-grid dd { font-size: 12px; }
+  .pad-key { min-width: 22px; height: 22px; }
+}
+
+@media (max-height: 460px) {
+  .loader-card { padding: 16px 20px 16px; border-radius: 18px; }
+  .loader-kicker { display: none; }
+  #loader-title { font-size: 22px; }
+  #loader-status { margin: 8px 0 10px; font-size: 13px; }
+  #loader-size { margin-top: 8px; }
+  #start-btn { margin-top: 12px; height: 40px; font-size: 14.5px; }
+}
+
+/* Narrow touch screens: no room beside the pad, so the help sits above it. */
+@media (max-width: 479px) {
+  .touch #help {
+    left: var(--pad-left);
+    max-width: none;
+    bottom: calc(var(--pad-bottom) + 2 * var(--key-size) + var(--key-gap) + 10px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+  #loader-bar:not([style*="width"]) { animation: none; width: 100%; opacity: 0.35; }
+  .command-pill::before { animation: none !important; }
+}
