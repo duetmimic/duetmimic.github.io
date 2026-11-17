@@ -132,8 +132,9 @@ because iOS rounds the corners itself and shows transparency as black.
 
 ## Before publishing
 
-- Fill every `<!-- TODO -->` placeholder in `index.html`: venue, authors and
-  affiliations, the abstract and the BibTeX entry.
+- Fill every `<!-- TODO -->` placeholder in `index.html`: venue, the
+  affiliation (the authors are in), the abstract and the rest of the BibTeX
+  entry.
 - Replace the placeholder links. Each of the four greyed-out link pills (Paper,
   arXiv, Code, Video) needs an `href`, `target="_blank" rel="noopener"`, and
   no `aria-disabled`, `is-soon` class or "(coming soon)" text. Update or delete

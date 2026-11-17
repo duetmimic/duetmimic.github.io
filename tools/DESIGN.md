@@ -105,7 +105,7 @@ twistForKeys(keys, demo.ui)        // sim/commands.js: Set of held keys -> {twis
 //      the pose after every control step (skipped while MAX_IN_FLIGHT = 6 frames are out) and adds
 //      frame.time (simulated s, never decreasing) and frame.epoch (resets so far: a new epoch is a jump).
 // render/scene.js (main): new DemoRenderer(hostElement, demo.visual, visualArrays,
-//      { onRelease /* frame => {}: done with it, buffer back to the worker */, chaseAzimuth: -135, delay: 0.012 });
+//      { onRelease /* frame => {}: done with it, buffer back to the worker */, chaseAzimuth: 180, chaseElevation: -20, delay: 0.012 });
 //      .setFrame(frame) (timed frames are queued and drawn interpolated, `delay` behind the newest);
 //      .tick(dt?) once per animation frame: draws only if something changed, returns whether it drew;
 //      .render(dt?); .invalidate(); .resize(); .resetView(); .setCameraMode('chase'|'follow'|'free');
@@ -207,8 +207,9 @@ shell sets `html.embed`, `html.touch` (coarse pointer), `html.no-focus` and
   `navigator.maxTouchPoints`: Playwright's WebKit emulation reports 0 while
   `(pointer: coarse)` matches.
 - **Default chase camera.** The ready screen keeps the front-right hero view;
-  Start switches to `chase`, behind the walker's right shoulder (the OSL is
-  the right leg), so W always walks into the screen and A/D turn the way they
+  Start switches to `chase`, directly behind the walker and slightly above
+  its head (azimuth 180°, elevation -20° at 3 m; set by the user on
+  2026-11-16, replacing a right-rear -135° view), so W always walks into the screen and A/D turn the way they
   look. With the fixed-angle `follow` camera, the camera's angle to the
   walker's heading went from -149° to +64° over one U-turn in the play-test,
   after which W walked toward the camera and A and D looked reversed. C cycles

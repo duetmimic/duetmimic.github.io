@@ -99,10 +99,10 @@ test('renderer screenshots in headless Chromium', { skip: process.env.DUET_BROWS
 
     const cam = await page.evaluate(() => window.renderTest.cameraChecks());
     console.log(`# camera: follow error ${(cam.follow * 1000).toFixed(2)} mm, orbit offset drift ${(cam.offsetDrift * 1000).toFixed(3)} mm, ` +
-      `chase azimuth error ${cam.chaseError.toFixed(2)} deg, free-mode drift ${(cam.freeDrift * 1000).toFixed(3)} mm, ` +
+      `chase azimuth error ${cam.chaseError.toFixed(2)} deg, elevation error ${cam.chaseElevationError.toFixed(2)} deg, free-mode drift ${(cam.freeDrift * 1000).toFixed(3)} mm, ` +
       `free-mode light lag ${(cam.lightLag * 1000).toFixed(2)} mm`);
     assert.ok(cam.follow < 0.01 && cam.offsetDrift < 0.001, 'follow mode');
-    assert.ok(cam.chaseError < 3, 'chase mode');
+    assert.ok(cam.chaseError < 3 && cam.chaseElevationError < 3, 'chase mode');
     assert.ok(cam.freeDrift < 1e-6 && cam.lightLag < 0.01, 'free mode: camera stays, light follows the walker');
 
     // Resize follows the host; dispose removes the canvas.

@@ -122,9 +122,10 @@ async function main() {
     const turned = move('stride', 2.0, 0.5, 90);
     for (let i = 0; i < 160; i++) view.update(0.05);
     const o = offset();
-    let rel = Math.atan2(o.y, o.x) - turned[3];
-    rel = Math.atan2(Math.sin(rel), Math.cos(rel)) * 180 / Math.PI;
-    const chaseError = Math.abs(rel - view.options.chaseAzimuth);
+    let rel = Math.atan2(o.y, o.x) - turned[3] - view.options.chaseAzimuth * Math.PI / 180;
+    const chaseError = Math.abs(Math.atan2(Math.sin(rel), Math.cos(rel))) * 180 / Math.PI;
+    const elevation = -Math.asin(o.z / o.length()) * 180 / Math.PI;
+    const chaseElevationError = Math.abs(elevation - view.options.chaseElevation);
 
     view.setCameraMode('free');
     const before = target();
@@ -135,7 +136,7 @@ async function main() {
     const lightLag = Math.hypot(lt.x - far[0] - off[0], lt.y - far[1] - off[1]);
     view.setCameraMode('follow');
     view.render();
-    return { follow, offsetDrift, chaseError, freeDrift, lightLag };
+    return { follow, offsetDrift, chaseError, chaseElevationError, freeDrift, lightLag };
   }
 
   // Wall time per render(), each followed by a 1-pixel readPixels so the GPU

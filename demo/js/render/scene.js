@@ -45,8 +45,10 @@ const DEFAULTS = {
   shadowExtent: 2.6,        // half-width of the key light's shadow box (m)
   followRate: 6.0,          // 1/s: how fast the camera target catches the pelvis
   chaseRate: 1.6,           // 1/s: how fast 'chase' swings behind the walker
-  chaseAzimuth: -135,       // deg from the walker's facing to the camera in 'chase':
-                            // right-rear three-quarter, the OSL (right leg) in profile
+  chaseAzimuth: 180,        // deg from the walker's facing to the camera in 'chase':
+                            // directly behind the walker
+  chaseElevation: -20,      // deg of the 'chase' camera (< 0: above the target, looking
+                            // down): slightly above the head at the default 3 m
   delay: 0.012,             // s: timed frames play back this far behind the newest
   onRelease: null,          // frame => {}: the renderer no longer reads this frame
   fog: [12, 60],            // near, far (m)
@@ -689,11 +691,12 @@ export class DemoRenderer {
     const target = this._targetVector();
     const camera = this.camera;
     if (this._snap && this._hasFrame) {
-      // Default view: from the walker's facing, chaseAzimuth in 'chase' (no
-      // swing after a reset), else azimuth_rel; elevation, distance.
+      // Default view: from the walker's facing, chaseAzimuth/chaseElevation in
+      // 'chase' (no swing after a reset), else azimuth_rel/elevation; distance.
       const c = this.cameraConfig;
-      const az = this._heading + THREE.MathUtils.degToRad(this._mode === 'chase' ? this.options.chaseAzimuth : c.azimuth_rel);
-      const el = THREE.MathUtils.degToRad(-c.elevation);
+      const chase = this._mode === 'chase';
+      const az = this._heading + THREE.MathUtils.degToRad(chase ? this.options.chaseAzimuth : c.azimuth_rel);
+      const el = THREE.MathUtils.degToRad(-(chase ? this.options.chaseElevation : c.elevation));
       this._smooth.copy(this._root);
       target.copy(this._root);
       camera.position.set(
@@ -712,14 +715,22 @@ export class DemoRenderer {
         target.add(delta);
       }
       if (this._mode === 'chase') {
+        // Swing behind the walker (azimuth) and up to the chase height
+        // (elevation); the distance stays where the user zoomed it.
         const ox = camera.position.x - target.x, oy = camera.position.y - target.y;
-        const want = this._heading + THREE.MathUtils.degToRad(this.options.chaseAzimuth);
-        let diff = want - Math.atan2(oy, ox);
-        diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-        const turn = diff * (1 - Math.exp(-this.options.chaseRate * dt));
-        const c = Math.cos(turn), s = Math.sin(turn);
-        camera.position.x = target.x + c * ox - s * oy;
-        camera.position.y = target.y + s * ox + c * oy;
+        const oz = camera.position.z - target.z;
+        const r = Math.hypot(ox, oy, oz) || this.cameraConfig.distance;
+        const k = 1 - Math.exp(-this.options.chaseRate * dt);
+        const azNow = Math.atan2(oy, ox);
+        let dAz = this._heading + THREE.MathUtils.degToRad(this.options.chaseAzimuth) - azNow;
+        dAz = Math.atan2(Math.sin(dAz), Math.cos(dAz));
+        const az = azNow + k * dAz;
+        const elNow = Math.asin(Math.min(1, Math.max(-1, oz / r)));
+        const el = elNow + k * (THREE.MathUtils.degToRad(-this.options.chaseElevation) - elNow);
+        camera.position.set(
+          target.x + r * Math.cos(el) * Math.cos(az),
+          target.y + r * Math.cos(el) * Math.sin(az),
+          target.z + r * Math.sin(el));
       }
     }
     if (this.controls) this.controls.update(dt);

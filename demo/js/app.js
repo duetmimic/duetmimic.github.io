@@ -8,8 +8,8 @@
 // everything is ready, #start-btn is enabled; pressing it (or a movement key,
 // or the touch pad) hides the loader and starts the simulation, which waits
 // paused until then with the model standing behind the loader, seen from the
-// front-right. Start switches the camera to 'chase', behind the walker's right
-// shoulder. Embedded (?embed=1), the parent page focuses the iframe on its own
+// front-right. Start switches the camera to 'chase': directly behind the
+// walker and slightly above its head. Embedded (?embed=1), the parent page focuses the iframe on its own
 // Start click, so the demo starts by itself when it is ready and the iframe
 // has keyboard focus; otherwise it shows Start, whose click also gives the
 // iframe the keyboard.
