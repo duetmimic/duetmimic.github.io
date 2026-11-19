@@ -1,12 +1,12 @@
 {
  "format": "duetmimic-demo/1",
  "source": {
-  "bundle": "stage2_R2_model_6898",
+  "bundle": "2026-11-15_20-24-39_s2_r6s7_B_decr025/model_6498",
   "kind": "osl_split_dual",
-  "run": "2026-11-10_13-38-21_s2_R2_c4b_short",
-  "checkpoint": "model_6898.pt",
+  "run": "2026-11-15_20-24-39_s2_r6s7_B_decr025",
+  "checkpoint": "model_6498.pt",
   "mujoco_version": "3.11.0",
-  "manifest_sha256": "a69f8d6232ff326856f2574556742e4d2476b29d3a23395c2e4e15babeadb8cf"
+  "manifest_sha256": "c65c993913e32f62defb4393fb5bd62dfb10f5f9600170b2096640e09b88cc49"
  },
  "policies": {
   "human": {
@@ -14,7 +14,7 @@
    "input_size": 2338,
    "output_size": 339,
    "layers": 50,
-   "bytes": 24753009,
+   "bytes": 24756743,
    "raw_bytes": 27202000,
    "quant": "int8_row",
    "params": 26921879,
@@ -41,25 +41,25 @@
    ],
    "check": {
     "parity_rows": 8,
-    "recorded_max_abs": 4.92e-07,
-    "onnx_max_abs": 4.92e-07,
-    "export_max_abs": 0.011517743,
-    "export_rms": 0.001908396,
-    "action_rms": 0.471120268
+    "recorded_max_abs": 4.71e-07,
+    "onnx_max_abs": 4.71e-07,
+    "export_max_abs": 0.013054603,
+    "export_rms": 0.002211567,
+    "action_rms": 0.466214517
    }
   },
   "osl": {
    "file": "osl.bin.gz",
-   "input_size": 600,
+   "input_size": 500,
    "output_size": 2,
    "layers": 11,
-   "bytes": 1072131,
-   "raw_bytes": 1157024,
+   "bytes": 976645,
+   "raw_bytes": 1053824,
    "quant": "f32",
-   "params": 288690,
-   "macs": 285184,
+   "params": 262890,
+   "macs": 259584,
    "widths": [
-    600,
+    500,
     256,
     256,
     256,
@@ -67,11 +67,11 @@
    ],
    "check": {
     "parity_rows": 8,
-    "recorded_max_abs": 1.2e-07,
-    "onnx_max_abs": 1.2e-07,
-    "export_max_abs": 1.2e-07,
-    "export_rms": 5e-08,
-    "action_rms": 0.077296964
+    "recorded_max_abs": 1.69e-07,
+    "onnx_max_abs": 1.69e-07,
+    "export_max_abs": 1.69e-07,
+    "export_rms": 6.5e-08,
+    "action_rms": 0.143406062
    }
   }
  },
@@ -975,6 +975,127 @@
    318,
    319
   ],
+  "touch_sites": {
+   "version": "feet_extended",
+   "declared": true,
+   "frame": "site pos/quat/size in the parent body's frame (MuJoCo site_pos, site_quat, site_size; box half-sizes)",
+   "sites": [
+    {
+     "site": "robot/OSL_KA_L1_r_foot_touch",
+     "sensor": "robot/r_foot",
+     "body": "robot/OSL_KA_L1_osl_foot_assembly",
+     "site_id": 1811,
+     "sensor_id": 108,
+     "body_id": 100,
+     "adr": 320,
+     "type": "box",
+     "pos": [
+      0.01,
+      -0.04,
+      0.0
+     ],
+     "quat": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     "size": [
+      0.065,
+      0.03,
+      0.05
+     ]
+    },
+    {
+     "site": "robot/OSL_KA_L1_r_toes_touch",
+     "sensor": "robot/r_toes",
+     "body": "robot/OSL_KA_L1_osl_foot_assembly",
+     "site_id": 1812,
+     "sensor_id": 109,
+     "body_id": 100,
+     "adr": 321,
+     "type": "box",
+     "pos": [
+      0.215,
+      -0.04,
+      -0.005
+     ],
+     "quat": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     "size": [
+      0.075,
+      0.03,
+      0.06
+     ]
+    },
+    {
+     "site": "robot/foot_touch_l",
+     "sensor": "robot/l_foot",
+     "body": "robot/calcn_l",
+     "site_id": 1944,
+     "sensor_id": 106,
+     "body_id": 104,
+     "adr": 318,
+     "type": "box",
+     "pos": [
+      0.09,
+      -0.014,
+      0.0
+     ],
+     "quat": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     "size": [
+      0.1,
+      0.014,
+      0.055
+     ]
+    },
+    {
+     "site": "robot/toes_touch_l",
+     "sensor": "robot/l_toes",
+     "body": "robot/toes_l",
+     "site_id": 1946,
+     "sensor_id": 107,
+     "body_id": 105,
+     "adr": 319,
+     "type": "box",
+     "pos": [
+      0.0275,
+      -0.014,
+      0.0
+     ],
+     "quat": [
+      0.9393726845901743,
+      0.0,
+      0.3428978848663966,
+      0.0
+     ],
+     "size": [
+      0.04,
+      0.014,
+      0.0675
+     ]
+    }
+   ]
+  },
+  "socket": {
+   "body": 94,
+   "name": "robot/OSL_KA_L1_osl_generic_socket",
+   "parent": 93,
+   "parent_name": "robot/femur_r",
+   "root": 2,
+   "subtree_mass": 5.3883649,
+   "cfrc_int_fresh": true,
+   "wrench": "frame.wrench (demo/js/render/frame.js) = [Fx, Fy, Fz, Tx, Ty, Tz], N and N m, MuJoCo world axes: the load the prosthesis applies to the residual limb at this body's origin xpos[body]: F = -cfrc_int[body][3:6], T = -(cfrc_int[body][0:3] + (subtree_com[root] - xpos[body]) x cfrc_int[body][3:6]); cfrc_int[body] is the wrench the parent applies to the body's subtree, [torque about subtree_com[root]; force]"
+  },
   "human": {
    "observation": {
     "schema": "osl_mimic_gait_v1",
@@ -2767,7 +2888,7 @@
   "osl": {
    "observation": {
     "schema": "osl_split_sensors_v1",
-    "size": 600,
+    "size": 500,
     "terms": [
      {
       "name": "actpack",
@@ -2775,6 +2896,30 @@
       "frame_dim": 10,
       "history": 25,
       "lag": 1,
+      "channels": [
+       "osl_knee_pos",
+       "osl_ankle_pos",
+       "osl_knee_vel",
+       "osl_ankle_vel",
+       "osl_imu_gyro_x",
+       "osl_imu_gyro_y",
+       "osl_imu_gyro_z",
+       "osl_imu_acc_x",
+       "osl_imu_acc_y",
+       "osl_imu_acc_z"
+      ],
+      "units": [
+       "rad",
+       "rad",
+       "rad/s",
+       "rad/s",
+       "rad/s",
+       "rad/s",
+       "rad/s",
+       "m/s^2",
+       "m/s^2",
+       "m/s^2"
+      ],
       "reads": [
        {
         "name": "osl_knee_pos",
@@ -2783,7 +2928,13 @@
         "components": null,
         "frame": 0,
         "saturation": null,
-        "tare": null
+        "tare": null,
+        "anchor": {
+         "kind": "joint",
+         "id": 62,
+         "body": 97,
+         "name": "robot/OSL_KA_L1_osl_knee_angle_r"
+        }
        },
        {
         "name": "osl_ankle_pos",
@@ -2792,7 +2943,13 @@
         "components": null,
         "frame": 1,
         "saturation": null,
-        "tare": null
+        "tare": null,
+        "anchor": {
+         "kind": "joint",
+         "id": 63,
+         "body": 100,
+         "name": "robot/OSL_KA_L1_osl_ankle_angle_r"
+        }
        },
        {
         "name": "osl_knee_vel",
@@ -2801,7 +2958,13 @@
         "components": null,
         "frame": 2,
         "saturation": null,
-        "tare": null
+        "tare": null,
+        "anchor": {
+         "kind": "joint",
+         "id": 62,
+         "body": 97,
+         "name": "robot/OSL_KA_L1_osl_knee_angle_r"
+        }
        },
        {
         "name": "osl_ankle_vel",
@@ -2810,7 +2973,13 @@
         "components": null,
         "frame": 3,
         "saturation": null,
-        "tare": null
+        "tare": null,
+        "anchor": {
+         "kind": "joint",
+         "id": 63,
+         "body": 100,
+         "name": "robot/OSL_KA_L1_osl_ankle_angle_r"
+        }
        },
        {
         "name": "osl_imu_gyro",
@@ -2819,7 +2988,13 @@
         "components": null,
         "frame": 4,
         "saturation": 17.453292519943297,
-        "tare": null
+        "tare": null,
+        "anchor": {
+         "kind": "site",
+         "id": 1809,
+         "body": 97,
+         "name": "robot/osl_imu"
+        }
        },
        {
         "name": "osl_imu_acc",
@@ -2828,16 +3003,38 @@
         "components": null,
         "frame": 7,
         "saturation": 39.2266,
-        "tare": null
+        "tare": null,
+        "anchor": {
+         "kind": "site",
+         "id": 1809,
+         "body": 97,
+         "name": "robot/osl_imu"
+        }
        }
       ]
      },
      {
       "name": "loadcell",
       "offset": 250,
-      "frame_dim": 12,
+      "frame_dim": 6,
       "history": 25,
       "lag": 1,
+      "channels": [
+       "osl_ankle_load_force_x",
+       "osl_ankle_load_force_y",
+       "osl_ankle_load_force_z",
+       "osl_ankle_load_torque_x",
+       "osl_ankle_load_torque_y",
+       "osl_ankle_load_torque_z"
+      ],
+      "units": [
+       "N",
+       "N",
+       "N",
+       "N m",
+       "N m",
+       "N m"
+      ],
       "reads": [
        {
         "name": "osl_ankle_load_force",
@@ -2850,7 +3047,13 @@
          0.01585177704691887,
          19.91429328918457,
          6.3090074036153965e-06
-        ]
+        ],
+        "anchor": {
+         "kind": "site",
+         "id": 1810,
+         "body": 99,
+         "name": "robot/OSL_KA_L1_r_osl_load_force"
+        }
        },
        {
         "name": "osl_ankle_load_torque",
@@ -2863,39 +3066,66 @@
          -0.06954404711723328,
          5.534438605536707e-05,
          0.0400029718875885
-        ]
+        ],
+        "anchor": {
+         "kind": "site",
+         "id": 1810,
+         "body": 99,
+         "name": "robot/OSL_KA_L1_r_osl_load_force"
+        }
+       }
+      ]
+     },
+     {
+      "name": "contact",
+      "offset": 400,
+      "frame_dim": 2,
+      "history": 25,
+      "lag": 1,
+      "channels": [
+       "osl_heel_contact",
+       "osl_toe_contact"
+      ],
+      "units": [
+       "N",
+       "N"
+      ],
+      "reads": [
+       {
+        "name": "osl_heel_contact",
+        "adr": 320,
+        "size": 1,
+        "components": null,
+        "frame": 0,
+        "saturation": null,
+        "tare": null,
+        "anchor": {
+         "kind": "site",
+         "id": 1811,
+         "body": 100,
+         "name": "robot/OSL_KA_L1_r_foot_touch"
+        }
        },
        {
-        "name": "osl_socket_load_force",
-        "adr": 334,
-        "size": 3,
+        "name": "osl_toe_contact",
+        "adr": 321,
+        "size": 1,
         "components": null,
-        "frame": 6,
+        "frame": 1,
         "saturation": null,
-        "tare": [
-         0.03543906286358833,
-         44.52143478393555,
-         1.4104746696830261e-05
-        ]
-       },
-       {
-        "name": "osl_socket_load_torque",
-        "adr": 337,
-        "size": 3,
-        "components": null,
-        "frame": 9,
-        "saturation": null,
-        "tare": [
-         -0.15453805029392242,
-         0.0001229690678883344,
-         0.13642261922359467
-        ]
+        "tare": null,
+        "anchor": {
+         "kind": "site",
+         "id": 1812,
+         "body": 100,
+         "name": "robot/OSL_KA_L1_r_toes_touch"
+        }
        }
       ]
      }
     ],
     "previous_command": {
-     "offset": 550,
+     "offset": 450,
      "history": 25,
      "width": 2,
      "low": -1.0,
@@ -2933,6 +3163,14 @@
       "delay_ticks": 5
      }
     ]
+   },
+   "sensor_set": {
+    "encoders": true,
+    "imu": true,
+    "ankle_load_cell": true,
+    "socket_load_cell": false,
+    "heel_contact": true,
+    "toe_contact": true
    }
   },
   "hold_servos": [],
@@ -2953,7 +3191,7 @@
  "reference": {
   "format": "duetmimic-reference/1",
   "file": "reference.bin.gz",
-  "bytes": 755053,
+  "bytes": 755201,
   "raw_bytes": 869024,
   "policy_dt": 0.01,
   "blend_steps": 40,
@@ -4635,11 +4873,324 @@
    "vertices": 124305,
    "simplify_error_m": 0.0003,
    "max_error_m": 0.0002999834541697055
+  },
+  "overlays": {
+   "roles": [
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "socket",
+    "hardware",
+    "hardware",
+    "cover",
+    "hardware",
+    "cover",
+    "hardware",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone",
+    "bone"
+   ],
+   "socket": {
+    "geom": 89,
+    "geom_id": 364,
+    "body": 94,
+    "local": [
+     0.0,
+     0.0,
+     0.099171155
+    ]
+   },
+   "markers": [
+    {
+     "key": "knee_encoder",
+     "label": "Knee encoder",
+     "kind": "encoder",
+     "geom": 92,
+     "geom_id": 367,
+     "local": [
+      -0.010827643,
+      -0.008237273,
+      -0.07229964
+     ],
+     "channels": [
+      0,
+      2
+     ],
+     "anchor": {
+      "kind": "joint",
+      "id": 62,
+      "name": "robot/OSL_KA_L1_osl_knee_angle_r",
+      "body": 97
+     },
+     "axis": [
+      -0.282613891,
+      -0.956476982,
+      -0.072671663
+     ]
+    },
+    {
+     "key": "ankle_encoder",
+     "label": "Ankle encoder",
+     "kind": "encoder",
+     "geom": 95,
+     "geom_id": 370,
+     "local": [
+      0.026037096,
+      -0.006746343,
+      -0.044930804
+     ],
+     "channels": [
+      1,
+      3
+     ],
+     "anchor": {
+      "kind": "joint",
+      "id": 63,
+      "name": "robot/OSL_KA_L1_osl_ankle_angle_r",
+      "body": 100
+     },
+     "axis": [
+      0.231150731,
+      0.972161039,
+      0.03836995
+     ]
+    },
+    {
+     "key": "imu",
+     "label": "IMU",
+     "kind": "imu",
+     "geom": 92,
+     "geom_id": 367,
+     "local": [
+      -0.009329949,
+      -0.01322133,
+      -0.012525765
+     ],
+     "channels": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ],
+     "anchor": {
+      "kind": "site",
+      "id": 1809,
+      "name": "robot/osl_imu",
+      "body": 97
+     }
+    },
+    {
+     "key": "ankle_cell",
+     "label": "Ankle load cell",
+     "kind": "load_cell",
+     "geom": 94,
+     "geom_id": 369,
+     "local": [
+      -0.032871957,
+      -0.005775016,
+      -0.034136381
+     ],
+     "channels": [
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+     ],
+     "anchor": {
+      "kind": "site",
+      "id": 1810,
+      "name": "robot/OSL_KA_L1_r_osl_load_force",
+      "body": 99
+     }
+    },
+    {
+     "key": "heel",
+     "label": "Heel contact",
+     "kind": "contact",
+     "geom": 95,
+     "geom_id": 370,
+     "local": [
+      -0.018232304,
+      0.010188268,
+      -0.024869916
+     ],
+     "channels": [
+      16
+     ],
+     "anchor": {
+      "kind": "site",
+      "id": 1811,
+      "name": "robot/OSL_KA_L1_r_foot_touch",
+      "body": 100
+     }
+    },
+    {
+     "key": "toe",
+     "label": "Toe contact",
+     "kind": "contact",
+     "geom": 95,
+     "geom_id": 370,
+     "local": [
+      0.015258575,
+      -0.004730294,
+      0.151356635
+     ],
+     "channels": [
+      17
+     ],
+     "anchor": {
+      "kind": "site",
+      "id": 1812,
+      "name": "robot/OSL_KA_L1_r_toes_touch",
+      "body": 100
+     }
+    }
+   ],
+   "zones": [
+    {
+     "key": "heel",
+     "geom": 95,
+     "geom_id": 370,
+     "type": "box",
+     "local": [
+      -0.010300747,
+      0.001191482,
+      -0.027138893
+     ],
+     "half": [
+      0.065,
+      0.03,
+      0.05
+     ],
+     "quat": [
+      0.501314406,
+      -0.584563157,
+      -0.372962386,
+      -0.517560471
+     ]
+    },
+    {
+     "key": "toe",
+     "geom": 95,
+     "geom_id": 370,
+     "type": "box",
+     "local": [
+      0.026685888,
+      -0.020659908,
+      0.173371719
+     ],
+     "half": [
+      0.075,
+      0.03,
+      0.06
+     ],
+     "quat": [
+      0.501314406,
+      -0.584563157,
+      -0.372962386,
+      -0.517560471
+     ]
+    }
+   ]
   }
  },
  "physics": {
   "file": "physics.mjb.gz",
-  "bytes": 462880,
+  "bytes": 462885,
   "raw_bytes": 2836709,
   "source_bytes": 102951933,
   "mujoco_version": "3.11.0",
@@ -4783,36 +5334,36 @@
    "policy_walk": {
     "physics_steps": 3500,
     "max_abs_diff": 0.0,
-    "contacts": 27313,
-    "mesh_contacts": 11,
-    "mesh_contact_pairs": 2,
+    "contacts": 26024,
+    "mesh_contacts": 7,
+    "mesh_contact_pairs": 1,
     "runs": [
-     "idle, then walk 1.0 m/s [idle], root moved 1.31 m: 300 steps",
-     "walk 1.0 m/s turning 0.5 rad/s [walk_fwd_vx+01000_vy+00000_wz+00500], root moved 1.93 m: 200 steps",
-     "walk backward 0.5 m/s [walk_bck_vx-00500_vy+00000_wz+00000], root moved 1.14 m: 200 steps"
+     "idle, then walk 1.0 m/s [idle], root moved 1.38 m: 300 steps",
+     "walk 1.0 m/s turning 0.5 rad/s [walk_fwd_vx+01000_vy+00000_wz+00500], root moved 1.97 m: 200 steps",
+     "walk backward 0.5 m/s [walk_bck_vx-00500_vy+00000_wz+00000], root moved 1.00 m: 200 steps"
     ],
     "replay_vs_closed_loop_max_abs": 0.0
    },
    "falls": {
     "physics_steps": 4000,
     "max_abs_diff": 0.0,
-    "contacts": 19178,
-    "mesh_contacts": 2312,
-    "mesh_contact_pairs": 17
+    "contacts": 19261,
+    "mesh_contacts": 2353,
+    "mesh_contact_pairs": 18
    },
    "penetrating_poses": {
     "physics_steps": 0,
     "max_abs_diff": 0.0,
     "contacts": 14478,
-    "mesh_contacts": 3104,
+    "mesh_contacts": 3103,
     "mesh_contact_pairs": 72,
     "poses": 600
    },
    "penetrating_poses_multiccd": {
     "physics_steps": 0,
     "max_abs_diff": 0.0,
-    "contacts": 15049,
-    "mesh_contacts": 3571,
+    "contacts": 15047,
+    "mesh_contacts": 3568,
     "mesh_contact_pairs": 72,
     "poses": 600
    },
@@ -4820,7 +5371,7 @@
     "queries": 20640,
     "max_abs_diff": 0.0
    },
-   "seconds": 11.1
+   "seconds": 11.0
   },
   "notes": [
    "mj_ray / mjv_select report no hit on mesh geoms (their faces are gone)",
@@ -4828,10 +5379,16 @@
   ]
  },
  "versions": {
-  "human.bin.gz": "e35f1c0868cf",
-  "osl.bin.gz": "f3e74b1164fd",
-  "physics.mjb.gz": "18fe5841ce27",
-  "reference.bin.gz": "3e340f45f24c",
+  "human.bin.gz": "a60587ef8938",
+  "osl.bin.gz": "ebe0faf8e226",
+  "physics.mjb.gz": "bf67781d1363",
+  "reference.bin.gz": "0d37fb1e2ed9",
   "visual.bin.gz": "4ecde3854742"
+ },
+ "sections": {
+  "physics": "c65c993913e32f62defb4393fb5bd62dfb10f5f9600170b2096640e09b88cc49",
+  "visual": "c65c993913e32f62defb4393fb5bd62dfb10f5f9600170b2096640e09b88cc49",
+  "policies": "c65c993913e32f62defb4393fb5bd62dfb10f5f9600170b2096640e09b88cc49",
+  "sim": "c65c993913e32f62defb4393fb5bd62dfb10f5f9600170b2096640e09b88cc49"
  }
 }

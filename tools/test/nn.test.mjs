@@ -1,9 +1,11 @@
 // MLP engine checks (demo/js/nn): node --test test/nn.test.mjs (from tools/).
 //
-// Needs the exported weights (demo/assets/r2/{human,osl}.bin.gz) and the
-// reference outputs that the exporter writes next to them
-// (tools/traces/nn_reference.bin.gz):
-//   python -m duet_export --out ../demo/assets/r2 --only policies
+// Needs the exported weights (demo/assets/stage2/{human,osl}.bin.gz, or
+// DUET_ASSETS; see paths.mjs) with their demo.json, and the reference outputs
+// that the exporter writes with them (NN_REF in paths.mjs:
+// tools/traces/nn_reference.bin.gz for the demo's folder, the file of that
+// name inside DUET_ASSETS otherwise):
+//   python -m duet_export --out ../demo/assets/stage2 --only policies
 // The WebGPU tests use Dawn through the 'webgpu' package and skip when it has
 // no adapter. Timings are printed as test diagnostics.
 
@@ -18,18 +20,22 @@ import {
   CPU_KERNELS, GPU_SLOWER_FACTOR, loadPolicy, parseNetwork, selfTest, selfTestInput, SELF_TEST_TOLERANCE,
 } from '../../demo/js/nn/index.js';
 import { createCpuBackend } from '../../demo/js/nn/cpu.js';
+import { ASSETS, NN_REF } from './paths.mjs';
 
-const ASSETS = new URL('../../demo/assets/r2/', import.meta.url);
-const REFERENCE = new URL('../traces/nn_reference.bin.gz', import.meta.url);
+const REFERENCE = NN_REF;
 const CPU_TOLERANCE = 1e-4; // JS CPU vs the float64 numpy forward of the same weights
 const NETS = ['human', 'osl'];
 
-const missing = [REFERENCE, new URL('human.bin.gz', ASSETS), new URL('osl.bin.gz', ASSETS)]
+const missing = [REFERENCE, new URL('human.bin.gz', ASSETS), new URL('osl.bin.gz', ASSETS), new URL('demo.json', ASSETS)]
   .filter((url) => !existsSync(fileURLToPath(url)))
   .map((url) => fileURLToPath(url));
-const skipAll = missing.length ? `missing ${missing.join(', ')}: run python -m duet_export --only policies` : false;
+const skipAll = missing.length
+  ? `missing ${missing.join(', ')}: run python -m duet_export --out ${fileURLToPath(ASSETS)} --only policies`
+  : false;
 
 const reference = skipAll ? null : await loadContainer(REFERENCE);
+// The network sizes the export recorded (demo.json "policies").
+const demo = skipAll ? null : JSON.parse(readFileSync(new URL('demo.json', ASSETS), 'utf8'));
 const rows = (name, key) => {
   const array = reference.arrays[`${name}.${key}`];
   const [count, width] = array.shape;
@@ -81,13 +87,22 @@ test('reference outputs match the exported containers', { skip: skipAll }, () =>
 
 test('containers parse into the expected networks', { skip: skipAll }, async () => {
   const human = parseNetwork(await loadContainer(new URL('human.bin.gz', ASSETS)));
+  assert.equal(human.inputSize, demo.policies.human.input_size);
+  assert.equal(human.outputSize, demo.policies.human.output_size);
+  assert.equal(human.inputSize, demo.sim.human.observation.size);
+  assert.equal(human.outputSize, demo.sim.human.action.size);
+  // The stage-2 human actor: the same architecture in R2 and B (different
+  // weights), 2338 -> ... -> 339.
   assert.equal(human.inputSize, 2338);
   assert.equal(human.outputSize, 339);
   assert.equal(human.layers.filter((l) => l.kind === 'linear').length, 17);
   assert.ok(human.layers.filter((l) => l.kind === 'linear').every((l) => l.quant === 'int8_row'));
   assert.equal(human.macs, 26858496);
   const osl = parseNetwork(await loadContainer(new URL('osl.bin.gz', ASSETS)));
-  assert.equal(osl.inputSize, 600);
+  assert.equal(osl.inputSize, demo.policies.osl.input_size);
+  assert.equal(osl.inputSize, demo.sim.osl.observation.size);
+  assert.equal(osl.outputSize, demo.policies.osl.output_size);
+  assert.equal(osl.outputSize, demo.sim.osl.action.size);
   assert.equal(osl.outputSize, 2);
   assert.ok(osl.layers.filter((l) => l.kind === 'linear').every((l) => l.quant === 'f32'));
 });
@@ -235,7 +250,8 @@ test('run() copies its input, keeps call order, rejects a wrong size', { skip: s
   const second = policy.run(buffer);
   assert.deepEqual(await first, expectA);
   assert.deepEqual(await second, expectB);
-  await assert.rejects(policy.run(new Float32Array(599)), /expected 600 inputs/);
+  const size = demo.policies.osl.input_size;
+  await assert.rejects(policy.run(new Float32Array(size - 1)), new RegExp(`expected ${size} inputs`));
   policy.dispose();
 });
 

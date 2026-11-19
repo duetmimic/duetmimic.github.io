@@ -1,11 +1,13 @@
-// Slim physics model checks (demo/assets/r2/physics.mjb.gz):
+// Slim physics model checks (demo/assets/stage2/physics.mjb.gz, or DUET_ASSETS):
 //   node --test test/physics.test.mjs        (from tools/)
 //
 // Loads the model through the demo's own loaders (demo/js/lib/{container,mujoco}.js)
 // in the vendored MuJoCo 3.11.0 WASM build, checks its counts against demo.json,
 // steps it, and compares a 200-step run with the native MuJoCo trace the
-// exporter recorded (tools/test/physics_wasm_ref.bin.gz). Both files come from
-//   python -m duet_export --out ../demo/assets/r2 --only physics
+// exporter recorded (PHYSICS_REF in paths.mjs: tools/test/physics_wasm_ref.bin.gz
+// for the demo's folder, the file of that name inside DUET_ASSETS otherwise).
+// Both files come from
+//   python -m duet_export --out ../demo/assets/stage2 --only physics
 // The WASM-vs-native difference and the step timings print as diagnostics.
 
 import { test, after } from 'node:test';
@@ -16,20 +18,21 @@ import { fileURLToPath } from 'node:url';
 
 import { fetchBytes, loadContainer, loadJSON } from '../../demo/js/lib/container.js';
 import { loadMujoco, modelFromBytes } from '../../demo/js/lib/mujoco.js';
+import { ASSETS, PHYSICS_REF } from './paths.mjs';
 
-const ASSETS = new URL('../../demo/assets/r2/', import.meta.url);
 const MODEL = new URL('physics.mjb.gz', ASSETS);
 const DEMO = new URL('demo.json', ASSETS);
-const NATIVE = new URL('physics_wasm_ref.bin.gz', import.meta.url);
+const NATIVE = PHYSICS_REF;
 // WASM vs native x86-64 after 200 steps (0.4 s) of contact-rich motion. Both
 // run the same MuJoCo 3.11.0 C code; only compiler and libm rounding differ,
-// and contact onsets amplify it (measured 2026-11-16: 6e-14 at step 25,
-// 8.9e-7 at its worst). Deterministic, so the margin only absorbs re-exports.
+// and contact onsets amplify it (measured on R2, 2026-11-16: 6e-14 at step
+// 25, 8.9e-7 at its worst; on B, 2026-11-18: 2.7e-13 and 2.3e-6).
+// Deterministic, so the margin only absorbs re-exports.
 const NATIVE_TOLERANCE = 1e-5;
 
 const missing = [MODEL, DEMO, NATIVE].filter((url) => !existsSync(fileURLToPath(url)));
 const skip = missing.length
-  ? `missing ${missing.map((url) => fileURLToPath(url)).join(', ')}: run python -m duet_export --only physics`
+  ? `missing ${missing.map((url) => fileURLToPath(url)).join(', ')}: run python -m duet_export --out ${fileURLToPath(ASSETS)} --only physics`
   : false;
 
 let mujoco, model, data, demo, native, bytes;

@@ -1,9 +1,11 @@
 // Browser check of the slim physics model: headless Chromium (Playwright) loads
-// the vendored MuJoCo 3.11.0 WASM build and demo/assets/r2/physics.mjb.gz inside
+// the vendored MuJoCo 3.11.0 WASM build and demo/assets/stage2/physics.mjb.gz
+// (or DUET_ASSETS, when it lies inside the repository; see paths.mjs) inside
 // a module Web Worker, through the demo's own loaders (fetch + gzip
 // DecompressionStream), as demo/js/worker.js will. It checks the bytes and the
-// counts against demo.json, replays the native trace of
-// tools/test/physics_wasm_ref.bin.gz and times mj_step.
+// counts against demo.json, replays the native trace of PHYSICS_REF
+// (paths.mjs: tools/test/physics_wasm_ref.bin.gz for the demo's folder) and
+// times mj_step.
 //
 //   PLAYWRIGHT_BROWSERS_PATH=<browsers> node --test test/physics_browser.test.mjs
 //
@@ -19,10 +21,14 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = fileURLToPath(new URL('../../', import.meta.url));
+import { PHYSICS_REF, REPO, served, servedAssets } from './paths.mjs';
+
+const ROOT = fileURLToPath(REPO);
 const PORT = Number(process.env.PHYSICS_TEST_PORT || 8701);
 const NATIVE_TOLERANCE = 1e-5; // as in physics.test.mjs
-const NEEDED = ['demo/assets/r2/physics.mjb.gz', 'demo/assets/r2/demo.json', 'tools/test/physics_wasm_ref.bin.gz'];
+const ASSETS = servedAssets(); // '/demo/assets/stage2/'; null: DUET_ASSETS outside ROOT
+const NATIVE = served(PHYSICS_REF); // '/tools/test/physics_wasm_ref.bin.gz' for the demo's folder
+const NEEDED = ASSETS ? [`${ASSETS}physics.mjb.gz`, `${ASSETS}demo.json`, NATIVE] : [];
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -52,12 +58,12 @@ self.onmessage = async () => {
     const t0 = performance.now();
     const mujoco = await loadMujoco();
     const t1 = performance.now();
-    const bytes = await fetchBytes('/demo/assets/r2/physics.mjb.gz');
+    const bytes = await fetchBytes('${ASSETS}physics.mjb.gz');
     const t2 = performance.now();
     const { model, data } = modelFromBytes(mujoco, bytes, 'physics.mjb');
     const t3 = performance.now();
-    const demo = await loadJSON('/demo/assets/r2/demo.json');
-    const native = await loadContainer('/tools/test/physics_wasm_ref.bin.gz');
+    const demo = await loadJSON('${ASSETS}demo.json');
+    const native = await loadContainer('${NATIVE}');
     const counts = {};
     for (const key of Object.keys(demo.physics.counts)) counts[key] = model[key];
     const start = () => {
@@ -140,7 +146,8 @@ function serve(root, port) {
 let chromium = null;
 let skip = false;
 const missing = NEEDED.filter((file) => !existsSync(path.join(ROOT, file)));
-if (missing.length) skip = `missing ${missing.join(', ')}: run python -m duet_export --only physics`;
+if (!ASSETS) skip = 'DUET_ASSETS lies outside the repository this test serves';
+else if (missing.length) skip = `missing ${missing.join(', ')}: run python -m duet_export --only physics`;
 if (!skip) {
   try {
     ({ chromium } = await import('playwright'));

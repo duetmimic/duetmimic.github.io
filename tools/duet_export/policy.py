@@ -1,6 +1,6 @@
 """Export section `policies`: the two actor networks as DUETBIN1 MLP containers.
 
-    cd tools && python -m duet_export --out ../demo/assets/r2 --only policies
+    cd tools && python -m duet_export --out ../demo/assets/stage2 --only policies
 
 Reads `human_actor.onnx` and `osl_actor.onnx` of the bundle (with onnx_lite, no
 `onnx` package), turns each graph into a flat layer list, checks a float64
@@ -10,13 +10,18 @@ and writes
 - `human.bin.gz`: Gemm weights int8, symmetric per output row
   (scale = max|row| / 127); everything else float32;
 - `osl.bin.gz`: everything float32 (0.29M parameters, not worth quantizing);
-- `tools/traces/nn_reference.bin.gz` (git-ignored): a few fixed inputs and the
-  float64 outputs of the *exported* (quantized) layers, computed from the
-  container bytes as written, for tools/test/nn.test.mjs.
+- `nn_reference.bin.gz`: a few fixed inputs and the float64 outputs of the
+  *exported* (quantized) layers, computed from the container bytes as written,
+  for tools/test/nn.test.mjs. For the demo's own asset folder it goes to
+  `tools/traces/` (git-ignored), for any other --out folder into that folder
+  (common.golden_path).
 
-Why int8 per row is enough (closed-loop study, 2026-11-16). Against fp32 the
-human net's action error is 1.3e-3 RMS / 1.2e-2 max on 1350 trace observations
-(1.3e-3 / 1.5e-2 on 2400 closed-loop observations from random key sequences),
+Why int8 per row is enough (closed-loop study on the R2 bundle
+stage2_R2_model_6898, 2026-11-16; not repeated for B, whose export prints and
+records its own open-loop error, demo.json policies.human.check). Against fp32
+the R2 human net's action error is 1.3e-3 RMS / 1.2e-2 max on 1350 trace
+observations (1.3e-3 / 1.5e-2 on 2400 closed-loop observations from random key
+sequences),
 about 2 % of the action noise the policy trained with (std 0.064-0.070). In
 osl_deploy's own runner.Simulation on native MuJoCo, with the bundle's OSL
 ONNX and a numpy human net, int8 fell exactly as often as fp32: idle -> 1.3 or
@@ -73,13 +78,14 @@ from pathlib import Path
 import numpy as np
 
 from . import onnx_lite
+from .common import golden_path
 from .container import read_container, write_container
 
 FORMAT = "duetmimic-mlp/1"
 REFERENCE_FORMAT = "duetmimic-nn-reference/1"
+REFERENCE_NAME = "nn_reference.bin.gz"  # golden for nn.test.mjs; golden_path places it
 CONTROLLERS = {"human": "int8_row", "osl": "f32"}  # name -> linear weight format
 ONNX_TOLERANCE = 1e-5  # numpy float64 forward vs onnxruntime / parity means
-TRACES = Path(__file__).resolve().parents[1] / "traces"
 SYNTHETIC_INPUTS = 2  # extra reference inputs: normalized values ~ N(0, 1)
 
 
@@ -470,8 +476,9 @@ def export(bundle_dir, out_dir, ctx):
 
 
 def _write_references(references, out_dir):
-    """tools/traces/nn_reference.bin.gz: fixed inputs -> float64 outputs per net."""
-    TRACES.mkdir(parents=True, exist_ok=True)
+    """nn_reference.bin.gz (golden_path): fixed inputs -> float64 outputs per net."""
+    path = golden_path(out_dir, REFERENCE_NAME)
+    path.parent.mkdir(parents=True, exist_ok=True)
     arrays, nets = {}, {}
     for name, ref in references.items():
         arrays[f"{name}.input"] = ref["input"].astype(np.float32)
@@ -492,6 +499,5 @@ def _write_references(references, out_dir):
         "dequantized as q * scale); onnx = onnxruntime float32 on the same inputs. "
         "The last rows are synthetic inputs whose normalized values are N(0, 1).",
     }
-    path = TRACES / "nn_reference.bin.gz"
     write_container(path, arrays, meta)
     print(f"[policies] reference outputs: {path}")

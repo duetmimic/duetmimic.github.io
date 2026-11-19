@@ -2,12 +2,12 @@
 //
 //   cd tools && node --test test/render_frame.test.mjs
 //
-// Needs demo/assets/r2/{demo.json,visual.bin.gz} (python -m duet_export --only
-// visual) and, for the pose checks, traces/render_poses.json
+// Needs demo/assets/stage2/{demo.json,visual.bin.gz} (or DUET_ASSETS; python -m
+// duet_export --only visual) and, for the pose checks, traces/render_poses.json
 // (python -m duet_export.visual poses traces/render_poses.json), which holds
 // MuJoCo's own mjv_addGeoms tendon capsules and geom frames for two poses.
-// The model is DUET_RENDER_MODEL, else demo/assets/r2/physics.mjb.gz, else the
-// original bundle model (about 20 s to load in wasm).
+// The model is DUET_RENDER_MODEL, else the asset folder's physics.mjb.gz, else
+// the original bundle model (paths.mjs BUNDLE; about 20 s to load in wasm).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,11 +17,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadMujoco, modelFromBytes } from '../../demo/js/lib/mujoco.js';
 import { fetchBytes, loadContainer } from '../../demo/js/lib/container.js';
 import { FrameExtractor } from '../../demo/js/render/frame.js';
+import { ASSETS, BUNDLE, TRACES } from './paths.mjs';
 
-const SITE = new URL('../../', import.meta.url);
-const ASSETS = new URL('demo/assets/r2/', SITE);
-const FIXTURE = new URL('../traces/render_poses.json', import.meta.url);
-const BUNDLE_MODEL = new URL('../osl_deploy/bundles/stage2_R2_model_6898/model.mjb', SITE);
+const FIXTURE = new URL('render_poses.json', TRACES);
+const BUNDLE_MODEL = new URL('model.mjb', BUNDLE);
 
 function modelUrl() {
   if (process.env.DUET_RENDER_MODEL) return pathToFileURL(process.env.DUET_RENDER_MODEL);

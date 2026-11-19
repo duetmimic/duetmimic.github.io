@@ -1,10 +1,13 @@
 // SimCore against osl_deploy's own Simulation (node --test).
 //
-// Needs the ORIGINAL bundle model (../osl_deploy/bundles/stage2_R2_model_6898,
-// override with DUET_BUNDLE=<folder>) and the git-ignored trace written by
+// Needs the ORIGINAL bundle model (paths.mjs BUNDLE, the bundle the exporter
+// defaults to; override with DUET_BUNDLE=<folder>) and the git-ignored trace
+// written by
 //   cd tools && python -m duet_export.trace
-// (tools/traces/r2_trace.bin.gz; see tools/duet_export/trace.py for its rows).
-// Without them the trace tests are skipped.
+// (tools/traces/trace.bin.gz, DUET_TRACE=<file>; see tools/duet_export/trace.py
+// for its rows). Without them the trace tests are skipped, and so they are
+// when the trace's manifest_sha256 is not demo.json's source.manifest_sha256
+// (a stale trace, from another bundle than the assets) or not the bundle's.
 //
 // Checks, driving everything from the trace's recorded requests and actions
 // (no networks run here):
@@ -24,7 +27,8 @@
 // hook clears xfrc_applied and runs before every mj_step.
 
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -34,17 +38,34 @@ import {
   CommandLatch, CommandSupport, GaitReference, HumanObservation, OslObservation,
   PreviousCommand, SimCore,
 } from '../../demo/js/sim/index.js';
+import { ASSETS, BUNDLE, TRACE } from './paths.mjs';
 
-const REPO = new URL('../../', import.meta.url);
-const BUNDLE = process.env.DUET_BUNDLE
-  ? new URL(`file://${process.env.DUET_BUNDLE.replace(/\/?$/, '/')}`)
-  : new URL('../osl_deploy/bundles/stage2_R2_model_6898/', REPO);
 const MODEL = new URL('model.mjb', BUNDLE);
-const TRACE = new URL('tools/traces/r2_trace.bin.gz', REPO);
-const DEMO = new URL('demo/assets/r2/demo.json', REPO);
-const REFERENCE = new URL('demo/assets/r2/reference.bin.gz', REPO);
-const missing = [MODEL, TRACE, DEMO, REFERENCE].filter((u) => !existsSync(fileURLToPath(u)));
-const SKIP = missing.length ? `missing ${missing.map((u) => fileURLToPath(u)).join(', ')}` : false;
+const MANIFEST = new URL('manifest.json', BUNDLE);
+const DEMO = new URL('demo.json', ASSETS);
+const REFERENCE = new URL('reference.bin.gz', ASSETS);
+const missing = [MODEL, MANIFEST, TRACE, DEMO, REFERENCE].filter((u) => !existsSync(fileURLToPath(u)));
+
+// A trace is only ground truth for the assets and the model of its own bundle.
+const loaded = missing.length ? null : await loadContainer(TRACE);
+function staleness() {
+  const recorded = loaded.meta.manifest_sha256;
+  const demo = JSON.parse(readFileSync(fileURLToPath(DEMO), 'utf8'));
+  const assets = demo.source && demo.source.manifest_sha256;
+  const bundle = createHash('sha256').update(readFileSync(fileURLToPath(MANIFEST))).digest('hex');
+  const short = (sha) => (sha ? sha.slice(0, 12) : 'none');
+  if (recorded !== assets) {
+    return `stale trace: ${fileURLToPath(TRACE)} was recorded from manifest ${short(recorded)} `
+      + `(${loaded.meta.bundle}), the assets from ${short(assets)} (${demo.source && demo.source.bundle}): `
+      + 'regenerate with python -m duet_export.trace';
+  }
+  if (recorded !== bundle) {
+    return `the trace's bundle (manifest ${short(recorded)}) is not ${fileURLToPath(BUNDLE)} `
+      + `(manifest ${short(bundle)}): set DUET_BUNDLE to the bundle the assets came from`;
+  }
+  return false;
+}
+const SKIP = missing.length ? `missing ${missing.map((u) => fileURLToPath(u)).join(', ')}` : staleness();
 
 const F32_EPS = 2 ** -23;
 const row = (a, width, i) => a.subarray(width * i, width * (i + 1));
@@ -101,9 +122,8 @@ describe('SimCore vs osl_deploy trace', { skip: SKIP }, () => {
     results.modelLoadMs = performance.now() - started;
     demo = await loadJSON(DEMO);
     reference = await loadContainer(REFERENCE);
-    const trace = await loadContainer(TRACE);
-    T = trace.arrays;
-    meta = trace.meta;
+    T = loaded.arrays;
+    meta = loaded.meta;
     N = meta.steps;
   });
 
@@ -174,7 +194,7 @@ describe('SimCore vs osl_deploy trace', { skip: SKIP }, () => {
       assert.ok(osl.assemble(oslIn));
       previous.write(b, oslIn);
       compare(oslIn, row(T.osl_obs, oslIn.length, b), oslGroups, oslStats);
-      previous.update(row(T.osl_mean, 2, b));
+      previous.update(row(T.osl_mean, sim.osl.action.size, b));
       // (a) the step's command boundary: request, consume on the robot's pose
       // after the step's physics (boundary b + 1), advance.
       latch.request(row(T.requested, 3, b));
@@ -236,17 +256,21 @@ describe('SimCore vs osl_deploy trace', { skip: SKIP }, () => {
     const sim = demo.sim;
     const nq = sim.model.nq, nu = sim.model.nu;
     const data = new mujoco.MjData(model);
+    // Widths from demo.json: the human and OSL action sizes, the OSL input and
+    // where its previous-command history starts (the sensor terms end there).
+    const humanOut = sim.human.action.size, oslOut = sim.osl.action.size;
+    const oslSize = sim.osl.observation.size, history = sim.osl.observation.previous_command.offset;
     let k = 0;
     const policies = {
-      human: { run: async () => row(T.human_mean, 339, k) },
-      osl: { run: async () => row(T.osl_mean, 2, k) },
+      human: { run: async () => row(T.human_mean, humanOut, k) },
+      osl: { run: async () => row(T.osl_mean, oslOut, k) },
     };
     const core = new SimCore({ mujoco, model, data, cfg: demo, reference, policies });
     const v0 = core.views();
     let resetQ = 0, resetObs = 0, resetOsl = 0;
     for (let i = 0; i < nq; i++) resetQ = Math.max(resetQ, Math.abs(v0.qpos[i] - T.qpos[i]));
     for (let i = 0; i < core.humanInput.length; i++) resetObs = Math.max(resetObs, Math.abs(core.humanInput[i] - T.human_obs[i]));
-    for (let i = 0; i < 550; i++) resetOsl = Math.max(resetOsl, Math.abs(core.oslInput[i] - T.osl_obs[i]));
+    for (let i = 0; i < history; i++) resetOsl = Math.max(resetOsl, Math.abs(core.oslInput[i] - T.osl_obs[i]));
     console.log(`[sim] reset: max |qpos - trace| ${fmt(resetQ)}, human obs ${fmt(resetObs)}, OSL sensor terms ${fmt(resetOsl)}`);
     assert.equal(resetQ, 0);
 
@@ -259,10 +283,10 @@ describe('SimCore vs osl_deploy trace', { skip: SKIP }, () => {
       // The input the OSL net would see this step (history + sensors).
       const info = await core.step();
       if (k < 100) {
-        const py = row(T.osl_obs, 600, k);
+        const py = row(T.osl_obs, oslSize, k);
         // core.oslInput now holds the NEXT boundary's sensor terms; compare the
         // last_action history written for this step instead.
-        for (let i = 550; i < 600; i++) oslInputErr = Math.max(oslInputErr, Math.abs(core.oslInput[i] - py[i]));
+        for (let i = history; i < oslSize; i++) oslInputErr = Math.max(oslInputErr, Math.abs(core.oslInput[i] - py[i]));
       }
       const v = core.views();
       const pc = row(T.ctrl, nu, k + 1), pb = row(T.bus, nu, k);
@@ -305,9 +329,10 @@ describe('SimCore vs osl_deploy trace', { skip: SKIP }, () => {
     let k = 0, physics = 0, observe = 0;
     // Stub policies replaying the trace's means (they keep it walking; zero
     // means would collapse it), with the trace's requests: idle, then walking.
+    const humanOut = demo.sim.human.action.size, oslOut = demo.sim.osl.action.size;
     const policies = {
-      human: { run: async () => row(T.human_mean, 339, k) },
-      osl: { run: async () => row(T.osl_mean, 2, k) },
+      human: { run: async () => row(T.human_mean, humanOut, k) },
+      osl: { run: async () => row(T.osl_mean, oslOut, k) },
     };
     const core = new SimCore({ mujoco, model, data, cfg: demo, reference, policies });
     for (k = 0; k < 20; k++) await core.step(); // warm up
@@ -332,9 +357,9 @@ describe('SimCore vs osl_deploy trace', { skip: SKIP }, () => {
 // demo model with stub policies (zero means): before every mj_step
 // xfrc_applied is cleared and the hook called with the tick since the reset;
 // its wrench moves the body; without a hook nothing is applied.
-const SLIM = new URL('demo/assets/r2/physics.mjb.gz', REPO);
+const SLIM = new URL('physics.mjb.gz', ASSETS);
 const SLIM_SKIP = [SLIM, DEMO, REFERENCE].some((u) => !existsSync(fileURLToPath(u)))
-  ? 'missing demo/assets/r2: run python -m duet_export' : false;
+  ? `missing ${fileURLToPath(ASSETS)}: run python -m duet_export` : false;
 
 describe('SimCore disturbance hook', { skip: SLIM_SKIP }, () => {
   let mujoco, model, data, core;

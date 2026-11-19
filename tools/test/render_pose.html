@@ -6,10 +6,12 @@
 <title>Render pose test</title>
 <!--
   Render test for demo/js/render/{frame,scene}.js, driven by render_shots.test.mjs.
-  Serve the folder that holds both duetmimic.github.io and osl_deploy, then open
-  /duetmimic.github.io/tools/test/render_pose.html?pose=stride
+  Serve the repository root, then open /tools/test/render_pose.html?pose=stride
   Query: pose=idle|stride|key (traces/render_poses.json; key = keyframe 0),
-  model=bundle (default, the original bundle model.mjb) | slim (physics.mjb.gz),
+  model=slim (default, the asset folder's physics.mjb.gz: the same ids and
+  kinematics as the bundle model) | bundle (the original bundle model.mjb, at
+  the URL bundle= names; render_shots.test.mjs serves it at /__bundle__/),
+  assets=<URL of an asset folder> (default ../../demo/assets/stage2/),
   view=azimuth,elevation,distance (degrees, degrees, metres; absolute).
 -->
 <style>
@@ -34,9 +36,9 @@ import { DemoRenderer } from '../../demo/js/render/scene.js';
 const params = new URLSearchParams(location.search);
 const status = document.getElementById('status');
 const say = (text) => { status.textContent = text; };
-const ASSETS = new URL('../../demo/assets/r2/', location.href);
+const ASSETS = new URL(params.get('assets') || '../../demo/assets/stage2/', location.href);
 const MODELS = {
-  bundle: new URL('../../../osl_deploy/bundles/stage2_R2_model_6898/model.mjb', location.href),
+  bundle: params.get('bundle') ? new URL(params.get('bundle'), location.href) : null,
   slim: new URL('physics.mjb.gz', ASSETS),
 };
 
@@ -46,7 +48,8 @@ async function main() {
   const container = await loadContainer(new URL(demo.visual.file, ASSETS));
   const fixture = await loadJSON(new URL('../traces/render_poses.json', location.href)).catch(() => null);
   say('loading model');
-  const which = params.get('model') || 'bundle';
+  const which = params.get('model') || 'slim';
+  if (!MODELS[which]) throw new Error(which === 'bundle' ? 'model=bundle needs bundle=<URL of the bundle\'s model.mjb>' : `unknown model ${which}`);
   const tModel = performance.now();
   const { model, data } = modelFromBytes(mujoco, await fetchBytes(MODELS[which]));
   const modelSeconds = (performance.now() - tModel) / 1000;
@@ -54,10 +57,15 @@ async function main() {
   // ?opts={...} overrides DemoRenderer options; ?look={...} overrides demo.visual keys (tuning).
   const opts = JSON.parse(params.get('opts') || '{}');
   const visual = { ...demo.visual, ...JSON.parse(params.get('look') || '{}') };
-  const view = new DemoRenderer(document.getElementById('viewport'), visual, container, { preserveDrawingBuffer: true, ...opts });
-  const extractor = new FrameExtractor(mujoco, model, demo.visual);
+  const socketParent = demo.sim && demo.sim.socket ? demo.sim.socket.parent : null;
+  const view = new DemoRenderer(document.getElementById('viewport'), visual, container, { preserveDrawingBuffer: true, socketParent, ...opts });
+  // With demo.sim, as the worker builds it: frames carry the wrench and sensors.
+  const extractor = new FrameExtractor(mujoco, model, demo.visual, demo.sim);
 
-  function pose(name) {
+  // wrench (optional, [Fx..Tz]): written into the frame instead of the pose's
+  // own; sensors (optional, {index: value}): frame.sensors values replaced;
+  // initial: the frame marked as the state a reset starts from (worker.js).
+  function pose(name, wrench = null, sensors = null, initial = false) {
     if (name === 'key' || !fixture) {
       mujoco.mj_resetDataKeyframe(model, data, 0);
       data.act.fill(0.1);
@@ -70,14 +78,20 @@ async function main() {
     }
     mujoco.mj_forward(model, data);
     const { frame } = extractor.extract(data);
+    if (wrench) frame.wrench.set(wrench);
+    if (sensors) for (const [k, v] of Object.entries(sensors)) frame.sensors[Number(k)] = v;
+    frame.initial = initial;
     view.setFrame(frame);
     view.resetView();
     view.render();
-    return { segments: frame.segmentCount, heading: frame.root[3], root: Array.from(frame.root.subarray(0, 3)) };
+    return {
+      segments: frame.segmentCount, heading: frame.root[3], root: Array.from(frame.root.subarray(0, 3)),
+      wrench: frame.wrench ? Array.from(frame.wrench) : null,
+    };
   }
 
-  function shot({ pose: name = 'stride', azimuth, elevation, distance, mode = 'follow' } = {}) {
-    const info = pose(name);
+  function shot({ pose: name = 'stride', azimuth, elevation, distance, mode = 'follow', wrench = null, sensors = null, initial = false } = {}) {
+    const info = pose(name, wrench, sensors, initial);
     view.setCameraMode(mode);
     if (azimuth !== undefined) view.setView({ azimuth, elevation, distance });
     for (let i = 0; i < 3; i++) view.render();
@@ -214,6 +228,471 @@ async function main() {
     return { ...out, bodies: out.bodies.size, overlay };
   }
 
+  // The X-ray view (view.setXray) on still poses, against MuJoCo: which meshes
+  // turn into ghosts and which keep their base material; the arrows' origin
+  // (the socket anchor, overlays.socket on geom_xpos/geom_xmat), direction and
+  // length for set wrenches (scale, cap, hidden below min), and the wrench
+  // blended with the pose's alpha between two timed frames; the grab glow on
+  // ghosts; picking (bones yes, hidden muscles no); no shader compiled by the
+  // first toggle (prewarmed); and the way back: base materials, shadow flags,
+  // muscles recomputed for the pose on screen, draw calls and triangles as before.
+  function xrayChecks() {
+    const ov = demo.visual.overlays, xc = view.options.xray;
+    const S = { pose: 'stride', azimuth: -60, elevation: -8, distance: 2.6 };
+    const meshes = view.geomMeshes;
+    const snap = () => ({
+      materials: meshes.map((m) => m.material), cast: meshes.map((m) => m.castShadow),
+      receive: meshes.map((m) => m.receiveShadow), order: meshes.map((m) => m.renderOrder),
+    });
+    const muscleMatrices = () => Array.from(view.muscles.instanceMatrix.array.subarray(0, 16 * view.muscles.count));
+    const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+    const draws = () => { view.render(); const s = view.stats; return { calls: s.calls, triangles: s.triangles }; };
+    const glowing = (m) => !!m.material.emissive && m.material.emissive.getHex() !== 0;
+    const out = { roles: {}, errors: [] };
+    const fail = (msg) => out.errors.push(msg);
+
+    // Baseline (X-ray off): the stride pose; the idle pose's muscles for later.
+    view.setXray(false);
+    shot({ pose: 'idle', azimuth: S.azimuth, elevation: S.elevation, distance: S.distance });
+    const idleMuscles = muscleMatrices();
+    shot(S);
+    const base = snap(), baseDraws = draws(), baseMuscles = muscleMatrices();
+    const programs0 = view.renderer.info.programs.length;
+    for (const r of view.roles) out.roles[r] = (out.roles[r] || 0) + 1;
+
+    // X-ray on.
+    view.setXray(true);
+    const onDraws = draws();
+    out.programsAdded = view.renderer.info.programs.length - programs0;
+    out.draws = { base: baseDraws, xray: onDraws };
+    out.musclesHidden = !view.muscles.visible;
+    meshes.forEach((m, i) => {
+      const role = view.roles[i];
+      if (role === 'bone' || role === 'socket') {
+        if (!m.material.isShaderMaterial || m.material === base.materials[i]) fail(`geom ${i} (${role}) is not a ghost`);
+        if (m.castShadow || m.receiveShadow) fail(`ghost geom ${i} casts or receives shadows`);
+      } else {
+        if (m.material !== base.materials[i]) fail(`geom ${i} (${role}) lost its base material`);
+        if (m.material.opacity !== 1 || m.material.transparent) fail(`geom ${i} (${role}) is not opaque`);
+        if (m.castShadow !== base.cast[i] || m.receiveShadow !== base.receive[i]) fail(`geom ${i} (${role}) changed its shadow flags`);
+      }
+    });
+
+    // Arrows for set wrenches: [wrench, expect force shown, expect moment shown].
+    const g = ov.socket.geom_id, l = ov.socket.local;
+    const anchorOf = () => {
+      const p = data.geom_xpos, R = data.geom_xmat, o = 3 * g, m = 9 * g;
+      return [0, 1, 2].map((k) => p[o + k] + R[m + 3 * k] * l[0] + R[m + 3 * k + 1] * l[1] + R[m + 3 * k + 2] * l[2]);
+    };
+    const px = (a, b) => { const p = view.projectToClient(a), q = view.projectToClient(b); return Math.hypot(p[0] - q[0], p[1] - q[1]); };
+    const cases = [
+      { name: 'stance', wrench: [120, -80, 650, 30, -12, 20] },
+      { name: 'capped', wrench: [0, 0, 2400, 0, 0, 200] },
+      { name: 'swing', wrench: [0, 0, -50, 0, 0, 0.1] },
+      { name: 'tiny', wrench: [1, 1, 1, 0.1, 0.1, 0.1] },
+    ];
+    out.arrows = {};
+    out.anchorWorld = 0; out.anchorPx = 0; out.originPx = 0; out.direction = 0; out.length = 0;
+    for (const c of cases) {
+      shot({ ...S, wrench: c.wrench });
+      const info = view.xrayInfo();
+      const w = Array.from(Float32Array.from(c.wrench)); // as the frame holds it
+      const anchor = anchorOf();
+      out.anchorWorld = Math.max(out.anchorWorld, Math.hypot(...info.anchor.map((v, k) => v - anchor[k])));
+      out.anchorPx = Math.max(out.anchorPx, px(info.anchor, anchor));
+      const dot = view._xrayView.dot.position.toArray();
+      out.anchorPx = Math.max(out.anchorPx, px(dot, anchor));
+      if (!same(view.wrench, w)) fail(`${c.name}: view.wrench ${view.wrench} is not the frame's ${w}`);
+      const row = {};
+      for (const [key, v] of [['force', w.slice(0, 3)], ['moment', w.slice(3, 6)]]) {
+        const a = info[key], cfg = xc[key];
+        const mag = Math.hypot(...v);
+        const want = mag >= cfg.min ? Math.min(cfg.scale * mag, cfg.cap) : 0;
+        row[key] = { shown: a.shown, length: a.length, want };
+        if (a.shown !== want > 0) { fail(`${c.name}: ${key} shown ${a.shown}, magnitude ${mag}`); continue; }
+        if (!a.shown) continue;
+        out.originPx = Math.max(out.originPx, px(a.origin, anchor));
+        out.direction = Math.max(out.direction, Math.hypot(...a.direction.map((d, k) => d - v[k] / mag)));
+        out.length = Math.max(out.length, Math.abs(a.length - want));
+      }
+      out.arrows[c.name] = row;
+    }
+
+    // The wrench blends with the pose's alpha between two timed frames.
+    {
+      const frames = [[1.0, [100, 0, 400, 10, 0, 0]], [1.01, [300, 0, 800, 50, 0, 20]]].map(([time, wrench]) => {
+        mujoco.mj_forward(model, data);
+        const { frame } = extractor.extract(data);
+        frame.wrench.set(wrench);
+        return Object.assign(frame, { time, epoch: 99 });
+      });
+      for (const f of frames) view.setFrame(f);
+      view.update(0);       // the first frame of the epoch
+      view.update(0.005);   // between the two
+      const alpha = view._shown.alpha;
+      const [a, b] = frames.map((f) => Array.from(f.wrench));
+      const want = a.map((v, k) => v + alpha * (b[k] - v));
+      const got = view.wrench;
+      out.blend = { alpha, error: Math.max(...got.map((v, k) => Math.abs(v - want[k]))) };
+      const info = view.xrayInfo();
+      const mag = Math.hypot(want[0], want[1], want[2]);
+      out.blend.length = Math.abs(info.force.length - Math.min(xc.force.scale * mag, xc.force.cap));
+    }
+    // The state a reset starts from (frame.initial): no wrench drawn, the dot
+    // only. A non-finite wrench: no arrow, nothing non-finite in the scene.
+    {
+      shot({ ...S, wrench: cases[0].wrench, initial: true });
+      const info = view.xrayInfo();
+      out.initial = { wrench: view.wrench, force: info.force.shown, moment: info.moment.shown, dot: view._xrayView.dot.visible && view._xrayView.group.visible };
+      if (out.initial.wrench !== null || out.initial.force || out.initial.moment || !out.initial.dot) fail(`an initial frame: ${JSON.stringify(out.initial)}`);
+      out.nonFinite = {};
+      for (const [name, wrench] of [['Fz Infinity', [0, 0, Infinity, 1, 2, 3]], ['F NaN', [NaN, 0, 600, 1, 2, 3]], ['Tz Infinity', [10, 0, 600, 0, 0, Infinity]]]) {
+        shot({ ...S, wrench });
+        const x = view.xrayInfo();
+        const finite = (a) => !a.shown || (Number.isFinite(a.length) && a.direction.every(Number.isFinite));
+        const q = [view._xrayView.force.group.quaternion, view._xrayView.moment.group.quaternion].every((r) => [r.x, r.y, r.z, r.w].every(Number.isFinite));
+        out.nonFinite[name] = { force: x.force.shown, moment: x.moment.shown, finite: finite(x.force) && finite(x.moment) && q };
+        if (!finite(x.force) || !finite(x.moment)) fail(`${name}: a non-finite arrow ${JSON.stringify(x)}`);
+      }
+      if (out.nonFinite['Fz Infinity'].force || out.nonFinite['F NaN'].force || out.nonFinite['Tz Infinity'].moment) fail(`a non-finite wrench drew an arrow: ${JSON.stringify(out.nonFinite)}`);
+    }
+    shot({ ...S, wrench: cases[0].wrench });
+
+    // The grab glow on ghosts (the ribcage's body), across an X-ray toggle.
+    {
+      const xy = view.projectToClient(view.geomPoint(21));
+      const hit = view.pick(xy[0], xy[1], 24);
+      if (!hit) throw new Error('xrayChecks: nothing to grab near the ribcage');
+      view.setPerturb({ geom: hit.geom, local: hit.local, target: hit.point, force: 100, maxForce: 400 });
+      view.render();
+      const lit = meshes.map((m, i) => (glowing(m) ? i : -1)).filter((i) => i >= 0);
+      out.glow = {
+        body: hit.body,
+        litBodies: [...new Set(lit.map((i) => view._geomBody[i]))],
+        litGhosts: lit.every((i) => meshes[i].material.isShaderMaterial),
+      };
+      view.setXray(false);
+      view.render();
+      out.glow.litOff = meshes.every((m, i) => glowing(m) === (view._geomBody[i] === hit.body) && (glowing(m) || m.material === base.materials[i]));
+      view.setXray(true);
+      view.render();
+      out.glow.litBack = meshes.every((m, i) => glowing(m) === (view._geomBody[i] === hit.body));
+      view.setPerturb(null);
+      view.render();
+      out.glow.unlit = meshes.every((m) => !glowing(m));
+    }
+
+    // Picking in X-ray: bones (ghosts) yes, hidden muscles never.
+    {
+      const rect = view.renderer.domElement.getBoundingClientRect();
+      let hits = 0, muscleOnly = 0;
+      for (let y = rect.top + 6; y < rect.bottom; y += 12) {
+        for (let x = rect.left + 6; x < rect.right; x += 12) {
+          const h = view.pick(x, y);
+          if (!h) continue;
+          hits += 1;
+          if (view._pickBones(view._cursorRay(x, y, true)).index < 0) muscleOnly += 1;
+        }
+      }
+      out.pick = { hits, muscleOnly };
+    }
+
+    // A new pose in X-ray skips the muscles; X-ray off poses them for it.
+    shot({ pose: 'idle', azimuth: S.azimuth, elevation: S.elevation, distance: S.distance });
+    out.skipped = !view.muscles.visible && !same(muscleMatrices(), idleMuscles);
+    view.setXray(false);
+    out.restoredIdle = view.muscles.visible && same(muscleMatrices(), idleMuscles);
+
+    // The way back on the baseline pose: as before X-ray, exactly.
+    shot(S);
+    view.setXray(true);
+    view.render();
+    view.setXray(false);
+    const back = snap(), backDraws = draws();
+    out.restore = {
+      materials: back.materials.every((m, i) => m === base.materials[i]),
+      shadows: back.cast.every((c, i) => c === base.cast[i]) && back.receive.every((r, i) => r === base.receive[i]),
+      order: back.order.every((o, i) => o === base.order[i]),
+      muscles: view.muscles.visible && same(muscleMatrices(), baseMuscles),
+      draws: backDraws, base: baseDraws,
+      arrowsHidden: !view._xrayView.group.visible,
+    };
+    return out;
+  }
+
+  // The sensor markers (view.setSensorMarkers) on still poses, against
+  // MuJoCo: each at its sensor (the site, or the joint's anchor, from
+  // MjData) and at its geom point as drawn, on screen where projectToClient
+  // puts it and drawn there (the pixel at its centre is its colour, the white
+  // ring around it); the contact glyphs sized and filled by their force (set
+  // frame.sensors values); no shader compiled by the first toggle
+  // (prewarmed); one draw call more, and exactly the baseline again when off;
+  // with the X-ray view too; never picked.
+  // Where a touch zone's glyph goes (duet_export/visual.py contact_point): the
+  // point of a foot collision geom's axis inside the zone box nearest its
+  // centre.
+  function contactPoint(site) {
+    const c = Array.from(data.site_xpos.subarray(3 * site, 3 * site + 3));
+    const r = data.site_xmat.subarray(9 * site, 9 * site + 9), half = model.site_size.subarray(3 * site, 3 * site + 3);
+    const weld = model.body_weldid[model.site_bodyid[site]];
+    let best = c, bestDistance = Infinity;
+    for (let g = 0; g < model.ngeom; g++) {
+      if (model.body_weldid[model.geom_bodyid[g]] !== weld || !(model.geom_contype[g] || model.geom_conaffinity[g])) continue;
+      const mid = Array.from(data.geom_xpos.subarray(3 * g, 3 * g + 3));
+      let point = mid;
+      if (model.geom_type[g] === 3 || model.geom_type[g] === 5) { // capsule, cylinder: the axis segment
+        const h = model.geom_size[3 * g + 1], x = data.geom_xmat;
+        const reach = [x[9 * g + 2] * h, x[9 * g + 5] * h, x[9 * g + 8] * h];
+        const a = mid.map((v, i) => v - reach[i]), ab = reach.map((v) => 2 * v);
+        const t = Math.min(1, Math.max(0, ((c[0] - a[0]) * ab[0] + (c[1] - a[1]) * ab[1] + (c[2] - a[2]) * ab[2]) / (ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2)));
+        point = a.map((v, i) => v + t * ab[i]);
+      }
+      const d = point.map((v, i) => v - c[i]);
+      const inside = [0, 1, 2].every((j) => Math.abs(r[j] * d[0] + r[3 + j] * d[1] + r[6 + j] * d[2]) <= half[j] + 1e-9);
+      if (inside && Math.hypot(...d) < bestDistance) { best = point; bestDistance = Math.hypot(...d); }
+    }
+    return best;
+  }
+
+  function sensorChecks() {
+    const ov = demo.visual.overlays;
+    const S = { pose: 'stride', azimuth: -70, elevation: -6, distance: 1.6 };
+    const out = { errors: [] };
+    const fail = (msg) => out.errors.push(msg);
+    const draws = () => { view.render(); const s = view.stats; return { calls: s.calls, triangles: s.triangles }; };
+    const gl = view.renderer.getContext();
+    const pixel = (x, y) => {
+      // Client px -> drawing-buffer px (origin bottom left).
+      const rect = view.renderer.domElement.getBoundingClientRect();
+      const k = view.renderer.domElement.width / rect.width;
+      const px = new Uint8Array(4);
+      gl.readPixels(Math.round((x - rect.left) * k), Math.round(view.renderer.domElement.height - (y - rect.top) * k), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return Array.from(px.subarray(0, 3));
+    };
+    const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    // Lift the stride pose's OSL foot loads: heel 0 (open), toe 400 N (half).
+    const heel = ov.markers.find((m) => m.key === 'heel').channels[0];
+    const toe = ov.markers.find((m) => m.key === 'toe').channels[0];
+    view.setSensorMarkers(false);
+    view.setXray(false);
+    // The whole leg in view: the free camera (it does not follow), aimed at the shank.
+    const aim = () => {
+      view.setCameraMode('free');
+      view.setView({ azimuth: S.azimuth, elevation: S.elevation, distance: S.distance, target: [view._root.x, view._root.y, 0.45] });
+      view.render();
+    };
+    shot({ ...S, sensors: { [heel]: 0, [toe]: 400 } });
+    aim();
+    const base = draws();
+    const programs0 = view.renderer.info.programs.length;
+    view.setSensorMarkers(true);
+    const on = draws();
+    out.programsAdded = view.renderer.info.programs.length - programs0;
+    out.draws = { base, on };
+    const info = view.sensorMarkersInfo();
+    out.count = info.length;
+    out.world = 0; out.anchor = 0; out.screen = 0;
+    const gx = data.geom_xpos, gm = data.geom_xmat;
+    for (const m of info) {
+      if (!m.shown) fail(`${m.key} is not shown`);
+      const o = ov.markers.find((x) => x.key === m.key);
+      // Its geom point from MjData, and its sensor: the site or the joint anchor.
+      const g = 3 * m.geom_id, R = 9 * m.geom_id, l = m.local;
+      const want = [0, 1, 2].map((k) => gx[g + k] + gm[R + 3 * k] * l[0] + gm[R + 3 * k + 1] * l[1] + gm[R + 3 * k + 2] * l[2]);
+      out.world = Math.max(out.world, Math.hypot(...m.world.map((v, k) => v - want[k])));
+      const a = o.anchor, src = a.kind === 'site' ? data.site_xpos : data.xanchor;
+      const zone = ov.zones.find((z) => z.key === m.key);
+      // A touch zone's glyph sits where the zone meets the foot, the others at their sensor.
+      const anchor = zone ? contactPoint(a.id) : [0, 1, 2].map((k) => src[3 * a.id + k]);
+      out.anchor = Math.max(out.anchor, Math.hypot(...m.world.map((v, k) => v - anchor[k])));
+      if (zone) {
+        const zg = 3 * zone.geom_id, zR = 9 * zone.geom_id, zl = zone.local;
+        const centre = [0, 1, 2].map((k) => gx[zg + k] + gm[zR + 3 * k] * zl[0] + gm[zR + 3 * k + 1] * zl[1] + gm[zR + 3 * k + 2] * zl[2]);
+        out.zoneCentre = Math.max(out.zoneCentre || 0, Math.hypot(...centre.map((v, k) => v - src[3 * a.id + k])));
+      }
+      const c = view.projectToClient(m.world), q = view.projectToClient(view.geomPoint(m.geom_id, m.local));
+      out.screen = Math.max(out.screen, Math.hypot(c[0] - q[0], c[1] - q[1]));
+    }
+    // Drawn where projected: the centre pixel is the glyph's colour (a glyph
+    // another lies over is skipped), a pixel 1 px inside the outer edge is
+    // white (its ring). Open contact glyphs show a light centre.
+    out.pixels = [];
+    const canvas = view.renderer.domElement.getBoundingClientRect();
+    for (let i = 0; i < info.length; i++) {
+      const m = info[i], c = view.projectToClient(m.world);
+      if (c[0] < canvas.left + 12 || c[0] > canvas.right - 12 || c[1] < canvas.top + 12 || c[1] > canvas.bottom - 12) { fail(`${m.key} is off screen`); continue; }
+      const covered = info.slice(i + 1).some((n) => { const d = view.projectToClient(n.world); return Math.hypot(d[0] - c[0], d[1] - c[1]) < (n.size + m.size) / 2; });
+      if (covered) continue;
+      const got = pixel(c[0], c[1]);
+      const rgb = hex(m.color);
+      const want = m.fill < 0.999 ? rgb.map((v) => 255 - (1 - (m.fill > 0 ? 0.2 + 0.8 * m.fill : 0.2)) * (255 - v)) : rgb;
+      // The white ring: the whitest pixel between the core and the faint edge.
+      let ring = 0;
+      for (let r = m.size / 2 - 4; r <= m.size / 2 - 0.5; r += 0.5) ring = Math.max(ring, Math.min(...pixel(c[0] + r, c[1])));
+      const centre = Math.max(...got.map((v, k) => Math.abs(v - want[k])));
+      out.pixels.push({ key: m.key, centre, ring });
+      if (m.fill >= 0.999 && centre > 12) fail(`${m.key}: centre pixel ${got} for ${m.color}`);
+      if (ring < 235) fail(`${m.key}: no white ring (${ring})`);
+    }
+    // Contact glyphs: open at 0 N, half filled and grown at 400 N, full at 2000 N.
+    const cfg = view.options.sensors.contact;
+    const byKey = (key) => view.sensorMarkersInfo().find((m) => m.key === key);
+    out.contact = { heel: { size: byKey('heel').size, fill: byKey('heel').fill }, toe: { size: byKey('toe').size, fill: byKey('toe').fill } };
+    const k = 400 / cfg.full;
+    if (byKey('heel').fill !== 0) fail('an unloaded heel is not open');
+    if (Math.abs(byKey('toe').fill - (0.35 + 0.65 * k)) > 1e-6) fail(`toe fill ${byKey('toe').fill}`);
+    if (Math.abs(byKey('toe').size - (byKey('heel').size + cfg.grow * k)) > 1e-5) fail(`toe size ${byKey('toe').size}`);
+    shot({ ...S, sensors: { [heel]: 2000, [toe]: 0 } });
+    out.contact.full = { size: byKey('heel').size, fill: byKey('heel').fill };
+    if (byKey('heel').fill !== 1 || Math.abs(byKey('heel').size - byKey('toe').size - cfg.grow) > 1e-5) fail('a heel at 2000 N is not full and grown');
+    // The contact glyphs lie on top (drawn last), the encoders at the bottom.
+    {
+      const layers = view.sensorMarkersInfo();
+      const top = Math.min(...layers.filter((m) => m.kind === 'contact').map((m) => m.layer));
+      out.layers = layers.map((m) => m.key);
+      if (layers.some((m) => m.kind !== 'contact' && m.layer > top)) fail(`the contact glyphs are not on top: ${out.layers}`);
+    }
+    // The state a reset starts from (frame.initial): no sensor frame, the
+    // contact glyphs open whatever the frame holds.
+    {
+      shot({ ...S, sensors: { [heel]: 900, [toe]: 900 }, initial: true });
+      const m = view.sensorMarkersInfo();
+      out.initial = { sensors: view.sensors, open: m.filter((x) => x.channel >= 0).every((x) => x.fill === 0) };
+      if (out.initial.sensors !== null || !out.initial.open) fail(`an initial frame: ${JSON.stringify(out.initial)}`);
+      shot({ ...S, sensors: { [heel]: NaN, [toe]: Infinity } });
+      const n = view.sensorMarkersInfo().filter((x) => x.channel >= 0);
+      out.nonFinite = n.map((x) => ({ key: x.key, size: x.size, fill: x.fill }));
+      if (!n.every((x) => Number.isFinite(x.size) && Number.isFinite(x.fill))) fail(`non-finite contact values: ${JSON.stringify(out.nonFinite)}`);
+    }
+    // The sensor frame blends with the pose's alpha between two timed frames.
+    {
+      const frames = [[2.0, 100], [2.01, 900]].map(([time, value]) => {
+        mujoco.mj_forward(model, data);
+        const { frame } = extractor.extract(data);
+        frame.sensors[heel] = value;
+        return Object.assign(frame, { time, epoch: 77 });
+      });
+      for (const f of frames) view.setFrame(f);
+      view.update(0);
+      view.update(0.005);
+      const alpha = view._shown.alpha;
+      out.blend = { alpha, error: Math.abs(view.sensors[heel] - (100 + alpha * 800)), play: view.playTime };
+    }
+    // A frame without sensors (an older worker): the markers still sit on the
+    // pose, the contact glyphs open, view.sensors null.
+    {
+      mujoco.mj_forward(model, data);
+      const { frame } = extractor.extract(data);
+      const bare = { geoms: frame.geoms, segments: frame.segments, segmentCount: frame.segmentCount, root: frame.root, buffer: frame.buffer };
+      view.setFrame(bare);
+      view.render();
+      const m = view.sensorMarkersInfo();
+      out.bare = { sensors: view.sensors, shown: m.every((x) => x.shown), open: m.filter((x) => x.channel >= 0).every((x) => x.fill === 0) };
+      if (out.bare.sensors !== null || !out.bare.shown || !out.bare.open) fail(`a frame without sensors: ${JSON.stringify(out.bare)}`);
+    }
+    // Never picked: picks at the glyphs' centres are those of the meshes under them.
+    shot(S);
+    aim();
+    const picks = info.map((m) => view.projectToClient(m.world));
+    const picked = () => picks.map(([x, y]) => { const h = view.pick(x, y); return h ? `${h.geom}:${h.point.map((v) => v.toFixed(6))}` : 'none'; });
+    const withMarkers = picked();
+    view.setSensorMarkers(false);
+    view.render();
+    const without = picked();
+    out.pickSame = withMarkers.every((p, i) => p === without[i]);
+    out.picked = withMarkers.filter((p) => p !== 'none').length;
+    out.off = draws();
+    if (view.stats.markers) fail('the markers stay drawn after off');
+    // With the X-ray view: both drawn, the markers last.
+    view.setXray(true);
+    view.setSensorMarkers(true);
+    shot({ ...S, wrench: [-90, 50, 700, 30, -20, 18] });
+    const st = view.stats;
+    out.xray = { markers: st.markers, xray: st.xray, order: view._markers.points.renderOrder > Math.max(...view._xrayView.group.children.flatMap((g) => [g.renderOrder, ...g.children.map((c) => c.renderOrder)])) };
+    view.setXray(false);
+    view.setSensorMarkers(false);
+    view.setCameraMode('follow');
+    view.render();
+    return out;
+  }
+
+  // Framing (view.setFraming, app.js frameWalker on phones): the picture is
+  // scaled about the canvas centre and moved; each marker then projects to
+  // the mapped point and is drawn there, a pick there grabs the same point of
+  // the same body, a resize keeps it, and null gives the view back exactly.
+  function framingChecks() {
+    const out = { errors: [] };
+    const fail = (msg) => out.errors.push(msg);
+    const S = { pose: 'stride', azimuth: -70, elevation: -6, distance: 2.2 };
+    const gl = view.renderer.getContext();
+    const pixel = (x, y) => {
+      const rect = view.renderer.domElement.getBoundingClientRect();
+      const k = view.renderer.domElement.width / rect.width;
+      const px = new Uint8Array(4);
+      gl.readPixels(Math.round((x - rect.left) * k), Math.round(view.renderer.domElement.height - (y - rect.top) * k), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return Array.from(px.subarray(0, 3));
+    };
+    const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    view.setSensorMarkers(true);
+    shot(S);
+    view.setCameraMode('free'); // the camera stays where it is put
+    view.render();
+    const rect = view.renderer.domElement.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+    const info = view.sensorMarkersInfo();
+    const before = info.map((m) => view.projectToClient(m.world));
+    const imu = info.findIndex((m) => m.key === 'imu');
+    const pickAt = ([x, y]) => { const h = view.pick(x, y, 0); return h ? { geom: h.geom, point: h.point } : null; };
+    const pick0 = pickAt(before[imu]);
+    const base = view.stats.calls;
+    const sizes0 = info.map((m) => m.size);
+    const f = { scale: 0.6, dx: -40, dy: 70 };
+    view.setFraming(f);
+    view.render();
+    out.framing = view.framing;
+    // The glyphs shrink with the framed walker, to options.sensors.minScale at most.
+    const minScale = view.options.sensors.minScale;
+    const scaled = (k) => view.sensorMarkersInfo().every((m, i) => Math.abs(m.size - sizes0[i] * Math.min(1, Math.max(minScale, k))) < 1e-4);
+    out.sizes = { at: scaled(f.scale) };
+    if (!out.sizes.at) fail(`glyph sizes under framing ${f.scale}: ${view.sensorMarkersInfo().map((m) => m.size)}`);
+    const after = info.map((m) => view.projectToClient(m.world));
+    out.mapped = 0;
+    after.forEach((c, i) => {
+      const want = [cx + f.scale * (before[i][0] - cx) + f.dx, cy + f.scale * (before[i][1] - cy) + f.dy];
+      out.mapped = Math.max(out.mapped, Math.hypot(c[0] - want[0], c[1] - want[1]));
+    });
+    // Drawn where projected: the centre pixel of each filled glyph not under another.
+    out.pixels = 0;
+    info.forEach((m, i) => {
+      if (m.fill < 0.999) return;
+      const c = after[i];
+      if (info.slice(i + 1).some((n, j) => Math.hypot(after[i + 1 + j][0] - c[0], after[i + 1 + j][1] - c[1]) < (n.size + m.size) / 2)) return;
+      const got = pixel(c[0], c[1]), want = hex(m.color);
+      out.pixels += 1;
+      if (Math.max(...got.map((v, k) => Math.abs(v - want[k]))) > 12) fail(`${m.key}: centre pixel ${got} for ${m.color} under framing`);
+    });
+    const pick1 = pickAt(after[imu]);
+    out.pick = pick0 && pick1 ? { geom: pick0.geom === pick1.geom, point: Math.hypot(...pick0.point.map((v, k) => v - pick1.point[k])) } : null;
+    if (!out.pick) fail('nothing picked at the IMU marker');
+    out.calls = view.stats.calls === base;
+    view.resize();
+    view.render();
+    out.resized = Math.max(...info.map((m, i) => { const c = view.projectToClient(m.world); return Math.hypot(c[0] - after[i][0], c[1] - after[i][1]); }));
+    view.setFraming({ scale: 0.3, dx: 0, dy: 0 });
+    out.sizes.min = scaled(0.3);
+    if (!out.sizes.min) fail('glyph sizes under framing 0.3 are not at the minimum scale');
+    view.setFraming(null);
+    view.render();
+    out.sizes.back = scaled(1);
+    if (!out.sizes.back) fail('glyph sizes not back without framing');
+    out.back = Math.max(...info.map((m, i) => { const c = view.projectToClient(m.world); return Math.hypot(c[0] - before[i][0], c[1] - before[i][1]); }));
+    out.cleared = view.framing === null && !(view.camera.view && view.camera.view.enabled);
+    view.setSensorMarkers(false);
+    view.setCameraMode('follow');
+    view.render();
+    return out;
+  }
+
   // Wall time per render(), each followed by a 1-pixel readPixels so the GPU
   // work is finished (software GL in headless runs: a bound, not a laptop figure).
   function timing(frames = 30) {
@@ -233,7 +712,7 @@ async function main() {
   const first = params.get('pose') || 'stride';
   const v = (params.get('view') || '').split(',').filter(Boolean).map(Number);
   const info = shot(v.length === 3 ? { pose: first, azimuth: v[0], elevation: v[1], distance: v[2] } : { pose: first });
-  window.renderTest = { shot, pose, move, cameraChecks, pickChecks, timing, view, extractor, glRenderer, modelSeconds, loadSeconds: (performance.now() - t0) / 1000 };
+  window.renderTest = { shot, pose, move, cameraChecks, pickChecks, xrayChecks, sensorChecks, framingChecks, timing, view, extractor, demo, glRenderer, modelSeconds, loadSeconds: (performance.now() - t0) / 1000 };
   say(`${which} model ${modelSeconds.toFixed(1)} s, ${info.triangles} triangles, ${info.calls} calls, ${info.segments} muscle segments, ${glRenderer}`);
   window.renderReady = true;
 }

@@ -1,7 +1,7 @@
 """Render assets for the browser demo: decimated meshes and the paper-figure look.
 
     cd tools
-    python -m duet_export --out ../demo/assets/r2 --only visual
+    python -m duet_export --out ../demo/assets/stage2 --only visual
     python -m duet_export.visual poses traces/render_poses.json   # test fixture
 
 Writes `visual.bin.gz` (DUETBIN1) and returns demo.json's "visual" section.
@@ -24,6 +24,32 @@ normals and per-mesh uint16 indices.
 Coordinates stay MuJoCo's: z up, metres. A geom is drawn at data.geom_xpos /
 geom_xmat (row-major); a mesh's vertices are in its geom frame, as MuJoCo's own
 renderer uses them.
+
+demo.json "visual.overlays" (computed from the model at qpos0, nothing in
+visual.bin.gz) serves the page's X-ray and sensing views; every point is fixed
+in the frame of a drawn geom on the same rigid body, so it rides the drawn,
+interpolated pose (world = geom_xpos + geom_xmat . local). A `geom` is an index
+into geom_ids (a row of the frame's geoms), `geom_id` the MuJoCo geom id:
+  roles    per drawn geom: "socket" (on the prosthesis socket body,
+           simcfg.SOCKET_BODY), "cover" (the OSL knee and ankle housings, the
+           orange covers), "hardware" (the rest of the prosthesis: the socket
+           body's subtree), "bone" (everything else: the human);
+  socket   {geom, geom_id, body, local}: the socket body's origin, the point
+           the frames' wrench acts at (render/frame.js);
+  markers  one per OSL sensor (the reads of the bundle's OSL observation that
+           share a site or joint and a kind): {key, label, kind (imu |
+           load_cell | contact | encoder), geom, geom_id, local, channels
+           (indices into the frame's sensors), anchor {kind: site | joint, id,
+           name, body}; a joint's also `axis`, its axis in the geom frame}.
+           `local` is the sensor's site, or its joint's anchor, except for a
+           touch sensor: its zone is a box around the foot's collision
+           capsules, whose centre can lie off the foot (B's toe zone runs
+           2-3 cm past the toe), so its glyph goes where the zone meets the
+           foot (contact_point: the point of a collision geom's axis inside
+           the zone nearest its centre; B: the toe end of the middle capsule);
+  zones    per touch sensor's zone: {key (its marker's), geom, geom_id, type
+           (the site's geom type, "box"), local (centre), half (site_size),
+           quat (orientation in the geom frame, w x y z)}.
 """
 
 import argparse
@@ -36,8 +62,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from .common import DEFAULT_BUNDLE
-from .container import write_container
+from .common import DEFAULT_BUNDLE, bundle_label, manifest_sha256
+from .simcfg import SOCKET_BODY, load_bundle_once, osl_bus_terms, write_container_atomic
 
 FORMAT = "duetmimic-visual/1"
 FILE = "visual.bin.gz"
@@ -94,6 +120,28 @@ CAMERA = {"fovy": 45.0, "distance": 3.0, "elevation": -12.0, "azimuth_rel": -65.
           "target_offset": [0.0, 0.0, -0.05]}
 # figure/config.py Style.light_dir: the direction the key light shines.
 LIGHT_DIR = (0.25, 0.35, -1.0)
+
+# Overlays: the role of each drawn geom, and a marker's kind by the type of its
+# sensors (the types osl_deploy's sensor observation accepts).
+ROLES = ("bone", "socket", "hardware", "cover")
+SENSOR = mujoco.mjtSensor
+MARKER_KIND = {
+    int(SENSOR.mjSENS_JOINTPOS): "encoder",
+    int(SENSOR.mjSENS_JOINTVEL): "encoder",
+    int(SENSOR.mjSENS_GYRO): "imu",
+    int(SENSOR.mjSENS_ACCELEROMETER): "imu",
+    int(SENSOR.mjSENS_FORCE): "load_cell",
+    int(SENSOR.mjSENS_TORQUE): "load_cell",
+    int(SENSOR.mjSENS_TOUCH): "contact",
+}
+# A marker's key comes from its reads' names (B: osl_knee_pos + osl_knee_vel ->
+# "knee_encoder", osl_imu_gyro + osl_imu_acc -> "imu", osl_ankle_load_force +
+# _torque -> "ankle_cell", osl_heel_contact -> "heel"): their common words,
+# without a leading "osl" or trailing words that name the quantity, then the
+# kind's suffix.
+MARKER_LEADING = {"osl"}
+MARKER_TRAILING = {"pos", "vel", "gyro", "acc", "force", "torque", "load", "contact", "touch", "angle"}
+MARKER_SUFFIX = {"encoder": ("_encoder", " encoder"), "load_cell": ("_cell", " load cell"), "contact": ("", " contact")}
 
 NODE_SIMPLIFY = r"""
 import fs from 'node:fs';
@@ -160,13 +208,18 @@ def drawn_geoms(model):
     return ids, looks
 
 
-def category(model, geom, rgba):
+def osl_cover(model, geom):
+    """An OSL knee or ankle assembly mesh: drawn as the figure's orange cover."""
     body = mujoco.mj_id2name(model, OBJ.mjOBJ_BODY, model.geom_bodyid[geom]) or ""
-    if (
+    return bool(
         body.endswith(OSL_COVER_BODIES)
         and model.geom_type[geom] == GEOM.mjGEOM_MESH
         and model.geom_group[geom] == 0
-    ):
+    )
+
+
+def category(model, geom, rgba):
+    if osl_cover(model, geom):
         return "osl_cover"
     if rgba[3] < 0.999:
         return "socket"
@@ -275,6 +328,213 @@ def root_frame(bundle_dir, model, manifest):
                 axis[k] = np.sign(local[k])
                 forward = axis if local @ axis > np.cos(np.radians(15)) else local
     return body, [float(v) for v in forward]
+
+
+# --------------------------------------------------------------------------
+# Overlays (demo.json visual.overlays, see the module docstring)
+
+
+def clean(values, digits=9):
+    """Floats for demo.json: rounded (to a nanometre for lengths), no -0.0."""
+    return [round(float(v), digits) + 0.0 for v in values]
+
+
+def subtree_bodies(model, root):
+    """The bodies of root's kinematic subtree, root included."""
+    bodies = set()
+    for b in range(model.nbody):
+        a = b
+        while a > 0 and a != root:
+            a = int(model.body_parentid[a])
+        if a == root:
+            bodies.add(b)
+    return bodies
+
+
+def geom_roles(model, ids, socket):
+    """Each drawn geom's role, by its body: on the socket body "socket"; on the
+    rest of the socket's subtree (the prosthesis) "cover" for the OSL housings,
+    else "hardware"; anywhere else (the human) "bone"."""
+    prosthesis = subtree_bodies(model, socket)
+    roles = []
+    for g in ids:
+        body = int(model.geom_bodyid[g])
+        if body == socket:
+            roles.append("socket")
+        elif body in prosthesis:
+            roles.append("cover" if osl_cover(model, g) else "hardware")
+        else:
+            roles.append("bone")
+    return roles
+
+
+def attached_geom(model, data, ids, body, point):
+    """The drawn geom (index into ids) that moves rigidly with `body`: one on the
+    body itself, else one on a body welded to it; the nearest to `point`."""
+    candidates = [i for i, g in enumerate(ids) if model.geom_bodyid[g] == body]
+    if not candidates:
+        weld = model.body_weldid[body]
+        candidates = [i for i, g in enumerate(ids) if model.body_weldid[model.geom_bodyid[g]] == weld]
+    if not candidates:
+        raise ValueError(f"no drawn geom moves with body {mujoco.mj_id2name(model, OBJ.mjOBJ_BODY, body)}")
+    return min(candidates, key=lambda i: float(np.linalg.norm(data.geom_xpos[ids[i]] - point)))
+
+
+def in_geom_frame(data, geom, point):
+    """A world point in a geom's frame: R_g^T (p - geom_xpos)."""
+    rot = data.geom_xmat[geom].reshape(3, 3)
+    return rot.T @ (np.asarray(point, dtype=float) - data.geom_xpos[geom])
+
+
+def contact_point(model, data, site):
+    """Where a touch sensor's zone (a box site) meets the foot: of the collision
+    geoms (contype or conaffinity set) that move with the site's body, the
+    point of a geom's axis (a capsule's or cylinder's segment, else its
+    centre) inside the box nearest the box's centre; the box's centre when no
+    axis enters it. A touch sensor sums the contacts inside its box, and those
+    act on these geoms, so the glyph marks the part of the foot it feels."""
+    centre = data.site_xpos[site].copy()
+    rot = data.site_xmat[site].reshape(3, 3)
+    half = model.site_size[site]
+    weld = model.body_weldid[model.site_bodyid[site]]
+    best, best_distance = centre, np.inf
+    for g in range(model.ngeom):
+        if model.body_weldid[model.geom_bodyid[g]] != weld or not (model.geom_contype[g] or model.geom_conaffinity[g]):
+            continue
+        middle = data.geom_xpos[g]
+        if model.geom_type[g] in (GEOM.mjGEOM_CAPSULE, GEOM.mjGEOM_CYLINDER):
+            reach = data.geom_xmat[g].reshape(3, 3)[:, 2] * model.geom_size[g][1]
+            a, b = middle - reach, middle + reach
+            ab = b - a
+            t = float(np.clip(np.dot(centre - a, ab) / np.dot(ab, ab), 0.0, 1.0))
+            point = a + t * ab
+        else:
+            point = middle.copy()
+        if np.any(np.abs(rot.T @ (point - centre)) > half + 1e-9):
+            continue
+        distance = float(np.linalg.norm(point - centre))
+        if distance < best_distance:
+            best, best_distance = point, distance
+    return best
+
+
+def marker_name(read_names, kind):
+    """(key, label) of a marker from its reads' names (MARKER_* above)."""
+    words = [name.lower().split("_") for name in read_names]
+    common = []
+    for parts in zip(*words, strict=False):
+        if len(set(parts)) != 1:
+            break
+        common.append(parts[0])
+    while common and common[0] in MARKER_LEADING:
+        common.pop(0)
+    while common and common[-1] in MARKER_TRAILING:
+        common.pop()
+    stem = "_".join(common)
+    if kind == "imu":
+        place = stem[: -len("imu")].rstrip("_") if stem.endswith("imu") else stem
+        key = f"{place}_imu" if place else "imu"
+        label = f"{place.replace('_', ' ')} IMU".strip()
+    else:
+        key_suffix, label_suffix = MARKER_SUFFIX[kind]
+        key = f"{stem}{key_suffix}" if stem else kind
+        label = f"{stem.replace('_', ' ')}{label_suffix}" if stem else kind.replace("_", " ")
+    return key, label[:1].upper() + label[1:]
+
+
+def overlay_section(model, ids, terms):
+    """demo.json visual.overlays for the drawn geoms `ids` and the OSL bus terms
+    as simcfg exports them (sim.osl.observation.terms): the frames' `sensors`
+    are those terms' frames, concatenated, so a read's values are channels
+    start + read.frame + c. Computed at qpos0 (every point is rigid in its
+    geom's frame)."""
+    data = mujoco.MjData(model)
+    mujoco.mj_kinematics(model, data)
+    socket = mujoco.mj_name2id(model, OBJ.mjOBJ_BODY, SOCKET_BODY)
+    if socket < 0:
+        raise ValueError(f"The bundle model has no body {SOCKET_BODY}")
+    origin = data.xpos[socket].copy()
+    s = attached_geom(model, data, ids, socket, origin)
+    if model.geom_bodyid[ids[s]] != socket:
+        raise ValueError(f"No drawn geom on the socket body {SOCKET_BODY}")
+    overlays = {
+        "roles": geom_roles(model, ids, socket),
+        "socket": {
+            "geom": s,
+            "geom_id": int(ids[s]),
+            "body": int(socket),
+            "local": clean(in_geom_frame(data, ids[s], origin)),
+        },
+        "markers": [],
+        "zones": [],
+    }
+    # Group the reads by (site or joint, kind), in frame order.
+    groups, start = {}, 0
+    for term in terms:
+        for read in term["reads"]:
+            sensor = int(np.flatnonzero(model.sensor_adr == read["adr"])[0])
+            kind = MARKER_KIND.get(int(model.sensor_type[sensor]))
+            if kind is None:
+                raise ValueError(f"OSL read {read['name']}: no marker kind for sensor type {model.sensor_type[sensor]}")
+            anchor = read["anchor"]
+            group = groups.setdefault(
+                (anchor["kind"], anchor["id"], kind), {"kind": kind, "anchor": anchor, "names": [], "channels": []}
+            )
+            dim = len(read["components"]) if read["components"] is not None else int(read["size"])
+            group["names"].append(read["name"])
+            group["channels"] += [start + int(read["frame"]) + c for c in range(dim)]
+        start += int(term["frame_dim"])
+    keys = set()
+    for group in groups.values():
+        anchor, kind = group["anchor"], group["kind"]
+        key, label = marker_name(group["names"], kind)
+        base, n = key, 1
+        while key in keys:
+            n += 1
+            key = f"{base}_{n}"
+        keys.add(key)
+        point = data.site_xpos[anchor["id"]] if anchor["kind"] == "site" else data.xanchor[anchor["id"]]
+        zone = kind == "contact" and anchor["kind"] == "site" and model.site_type[anchor["id"]] == GEOM.mjGEOM_BOX
+        centre = point
+        if zone:
+            point = contact_point(model, data, anchor["id"])
+        g = attached_geom(model, data, ids, anchor["body"], point)
+        rot = data.geom_xmat[ids[g]].reshape(3, 3)
+        marker = {
+            "key": key,
+            "label": label,
+            "kind": kind,
+            "geom": g,
+            "geom_id": int(ids[g]),
+            "local": clean(in_geom_frame(data, ids[g], point)),
+            "channels": sorted(group["channels"]),
+            "anchor": {
+                "kind": anchor["kind"],
+                "id": int(anchor["id"]),
+                "name": anchor["name"],
+                "body": int(anchor["body"]),
+            },
+        }
+        if anchor["kind"] == "joint":
+            marker["axis"] = clean(rot.T @ data.xaxis[anchor["id"]])
+        overlays["markers"].append(marker)
+        if zone:
+            site = anchor["id"]
+            quat = np.zeros(4)
+            mujoco.mju_mat2Quat(quat, (rot.T @ data.site_xmat[site].reshape(3, 3)).reshape(-1))
+            quat = -quat if quat[0] < 0 else quat
+            overlays["zones"].append(
+                {
+                    "key": key,
+                    "geom": g,
+                    "geom_id": int(ids[g]),
+                    "type": mujoco.mjtGeom(model.site_type[site]).name.removeprefix("mjGEOM_").lower(),
+                    "local": clean(in_geom_frame(data, ids[g], centre)),
+                    "half": clean(model.site_size[site]),
+                    "quat": clean(quat),
+                }
+            )
+    return overlays
 
 
 # --------------------------------------------------------------------------
@@ -483,7 +743,7 @@ def export(bundle_dir, out_dir, ctx):
         "normals": "int8, n = q / 127",
         "indices": "uint16, local to each mesh (add nothing: one BufferGeometry per mesh)",
     }
-    size = write_container(out_dir / FILE, arrays, meta)
+    size = write_container_atomic(out_dir / FILE, arrays, meta)
 
     tendons = drawn_tendons(model)
     root_body, forward = root_frame(bundle_dir, model, manifest)
@@ -494,6 +754,20 @@ def export(bundle_dir, out_dir, ctx):
         f"{sum(m['vertices'] for m in meshes)} vertices; {FILE} {size['bytes'] / 1e6:.2f} MB "
         f"({size['raw_bytes'] / 1e6:.2f} MB raw); {len(tendons)} tendons, "
         f"<= {max_segments(model, tendons)} segments"
+    )
+    overlays = overlay_section(model, ids, osl_bus_terms(load_bundle_once(bundle_dir, ctx)))
+    # The roles come from the bodies; the materials (by colour and opacity)
+    # should agree with them.
+    looks_as = [{"osl_cover": "cover"}.get(c, c) for c in (specs[k]["category"] for k in geom_material)]
+    differ = [int(g) for g, role, look in zip(ids, overlays["roles"], looks_as, strict=True) if role != look]
+    if differ:
+        print(f"[visual] warning: geoms {differ} have a role other than their material's category")
+    counts = {role: overlays["roles"].count(role) for role in ROLES}
+    print(
+        f"[visual] overlays: roles {counts}; socket geom {overlays['socket']['geom_id']} "
+        f"local {overlays['socket']['local']}; markers "
+        f"{[(mk['key'], mk['geom_id'], mk['channels']) for mk in overlays['markers']]}; "
+        f"zones {[z['key'] for z in overlays['zones']]}"
     )
     return {
         "visual": {
@@ -528,6 +802,8 @@ def export(bundle_dir, out_dir, ctx):
                 "simplify_error_m": SIMPLIFY_ERROR,
                 "max_error_m": max(m["error"] for m in meshes),
             },
+            # X-ray and sensing views (module docstring; tools/DESIGN.md).
+            "overlays": overlays,
         }
     }
 
@@ -574,7 +850,11 @@ def write_poses(path, bundle_dir=DEFAULT_BUNDLE):
     ids, _ = drawn_geoms(model)
     tendons = drawn_tendons(model)
     rng = np.random.default_rng(7)
-    out = {"bundle": bundle_dir.name, "poses": {}}
+    out = {
+        "bundle": bundle_label(bundle_dir, manifest),
+        "manifest_sha256": manifest_sha256(bundle_dir),
+        "poses": {},
+    }
     with np.load(bundle_dir / "reference.npz", allow_pickle=False) as npz:
         ref = {k: npz[k] for k in ("root_pos", "root_quat", "joint_pos", "num_frames")}
     walk = names.index("walk_fwd_vx+01000_vy+00000_wz+00000")

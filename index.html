@@ -118,9 +118,11 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8 5.2v13.6L19 12z"/></svg>
               Start interactive demo
             </button>
-            <!-- Measured 2026-11-16: 31.2 MB over the wire (demo/assets/r2/*.gz and
-                 mujoco.wasm.gz as stored, the scripts gzip-encoded as GitHub Pages
-                 sends them). Re-measure when the exported assets change; the demo's
+            <!-- Measured 2026-11-16: 31.2 MB over the wire (the R2 bundle's
+                 demo/assets/*.gz and mujoco.wasm.gz as stored, the scripts
+                 gzip-encoded as GitHub Pages sends them); with bundle B's assets
+                 (demo/assets/stage2, 2026-11-18) the same sum is 31.1 MB.
+                 Re-measure when the exported assets change; the demo's
                  own loader computes its figure from demo.json. site.js rewrites
                  #demo-hint on touch screens and in browsers without WebGPU. -->
             <p class="demo-note">About 31&nbsp;MB download<span id="demo-hint"> · best on a desktop with a keyboard</span></p>
@@ -130,8 +132,9 @@
 
       <div class="demo-bar">
         <!-- Checked against demo.json "ui" and the help panel in demo/index.html
-             on 2026-11-16; keep them in step if the bindings change. "Drag":
-             a press on the body pulls it (a drag on the background orbits). -->
+             on 2026-11-16 (X, the X-ray view, and G, the sensor charts:
+             2026-11-19); keep them in step if the bindings change. "Drag": a
+             press on the body pulls it (a drag on the background orbits). -->
         <ul class="key-list" aria-label="Demo controls">
           <li><span class="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span> move and turn</li>
           <li><span class="keys"><kbd>1</kbd>–<kbd>5</kbd></span> speed</li>
@@ -139,6 +142,8 @@
           <li><span class="keys"><kbd>Space</kbd></span> pause</li>
           <li><span class="keys"><kbd>R</kbd></span> reset</li>
           <li><span class="keys"><kbd>C</kbd></span> camera</li>
+          <li><span class="keys"><kbd>X</kbd></span> X-ray view</li>
+          <li><span class="keys"><kbd>G</kbd></span> sensor charts</li>
           <li><span class="keys"><kbd>Drag</kbd></span> pull the body</li>
         </ul>
         <div class="demo-actions">

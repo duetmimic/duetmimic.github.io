@@ -23,7 +23,9 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = fileURLToPath(new URL('../../', import.meta.url));
+import { NN_REF, REPO, served, servedAssets } from './paths.mjs';
+
+const ROOT = fileURLToPath(REPO);
 const PORT = Number(process.env.NN_TEST_PORT || 8711);
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -33,7 +35,9 @@ const TYPES = {
   '.wasm': 'application/wasm',
   '.gz': 'application/octet-stream', // served as stored, like GitHub Pages serves .gz
 };
-const NEEDED = ['demo/assets/r2/human.bin.gz', 'demo/assets/r2/osl.bin.gz', 'tools/traces/nn_reference.bin.gz'];
+const ASSETS = servedAssets(); // '/demo/assets/stage2/'; null: DUET_ASSETS outside ROOT
+const REFERENCE = served(NN_REF); // '/tools/traces/nn_reference.bin.gz' for the demo's folder
+const NEEDED = ASSETS ? [`${ASSETS}human.bin.gz`, `${ASSETS}osl.bin.gz`, REFERENCE] : [];
 
 function serve(root, port) {
   const server = http.createServer(async (request, response) => {
@@ -63,7 +67,8 @@ function serve(root, port) {
 let chromium = null;
 let skip = false;
 const missing = NEEDED.filter((file) => !existsSync(path.join(ROOT, file)));
-if (missing.length) skip = `missing ${missing.join(', ')}: run python -m duet_export --only policies`;
+if (!ASSETS) skip = 'DUET_ASSETS lies outside the repository this test serves';
+else if (missing.length) skip = `missing ${missing.join(', ')}: run python -m duet_export --only policies`;
 if (!skip) {
   try {
     ({ chromium } = await import('playwright'));
@@ -92,7 +97,10 @@ test('nn engine in a module worker in headless Chromium: WebGPU vs CPU', { skip,
   const messages = [];
   page.on('console', (message) => messages.push(message.text()));
   page.on('pageerror', (error) => messages.push(`page error: ${error.message}`));
-  await page.goto(`http://127.0.0.1:${PORT}/tools/test/nn_browser.html`);
+  await page.goto(
+    `http://127.0.0.1:${PORT}/tools/test/nn_browser.html?assets=${encodeURIComponent(ASSETS)}` +
+      `&reference=${encodeURIComponent(REFERENCE)}`,
+  );
   let result;
   try {
     await page.waitForFunction(() => window.nnResult !== undefined, null, { timeout: 540000, polling: 500 });

@@ -6,19 +6,27 @@
 //   idle 1 s, W 4 s, W+A 3 s, W 2 s, D 2 s, S 3 s, idle 2 s,
 //   Digit5 then W 3 s, Digit1 then W 2 s, A 2 s, idle 2 s.
 // Checks: no fall; the root walks forward along its heading during W, at
-// least 0.8x the commanded speed x time (a W that starts from standing is
-// measured after its first 1.5 s: getting from a standstill to walking pace
-// takes 1-1.5 s); it turns left during W+A and A and right during D and walks
-// backward during S. A restart after a stop that misses the pace check is
-// reported as an incident and at most one is tolerated: restarting after
-// backing up occasionally hesitates for 2-3 s, a limit of the policy itself
-// (fp32 too) that command shaping does not remove. The first walk after a
-// reset is gated in DemoSession and must meet it. Prints per-step timings and
-// the achievable real-time factor.
+// least 0.8x the commanded speed x time, and backward during S, at least
+// BACKWARD_FRACTION of it. A walk that starts from a standstill (after
+// standing or turning in place) is measured after its first 1.5 s: getting
+// from a standstill to walking pace takes 1-1.5 s, and bundle B, backing up
+// after the schedule's walk and turn in place, hardly moves in its first
+// second. It turns left during W+A and A and right during D. A forward
+// restart after a stop that misses the pace check is reported as an incident
+// and at most one is tolerated: restarting after backing up occasionally
+// hesitates for 2-3 s, a limit of the policy itself (fp32 too) that command
+// shaping does not remove. The first walk after a reset is gated in
+// DemoSession and must meet it. Prints per-step timings and the achievable
+// real-time factor.
 //
-// Also: the real-time pacer (fake clock); command shaping (W while backing up
-// stands first, the HUD says so, and the forward walk is served within
-// SHAPING.maxHold); a fixed-seed key-masher (the human key model of the
+// Also: the real-time pacer (fake clock); the first walk after a reset (W,
+// W+A, W+D and Shift+W pressed at FIRST_WALK_DELAYS after a reset, and S,
+// S+A and S+D at level 4 at FIRST_BACK_DELAYS: no fall within
+// FIRST_WALK_SECONDS, and the start gate releases each one inside
+// SHAPING.startWindow, backing up inside SHAPING.backStartWindow, within
+// SHAPING.startWait); command shaping (W while
+// backing up stands first, the HUD says so, and the forward walk is served
+// within SHAPING.maxHold); a fixed-seed key-masher (the human key model of the
 // shaping benchmark: holds of 0.4-4 s, taps, steering while walking, direct
 // reversals, stops, level changes and Shift) whose falls must stay within the
 // measured bound; and the fall -> relaxed physics -> reset sequence. Loading:
@@ -55,11 +63,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   DRAG, DemoSession, Pacer, SHAPING, STARTING, STOPPING, clipLabel, speedText,
 } from '../../demo/js/session.js';
+import { ASSETS } from './paths.mjs';
 
-const ASSETS = new URL('../../demo/assets/r2/', import.meta.url);
 const NEEDED = ['demo.json', 'physics.mjb.gz', 'reference.bin.gz', 'human.bin.gz', 'osl.bin.gz', 'visual.bin.gz'];
 const missing = NEEDED.filter((f) => !existsSync(fileURLToPath(new URL(f, ASSETS))));
-const SKIP = missing.length ? `missing demo/assets/r2/{${missing.join(',')}}: run python -m duet_export` : false;
+const SKIP = missing.length ? `missing ${fileURLToPath(ASSETS)}{${missing.join(',')}}: run python -m duet_export` : false;
 
 const SCHEDULE = [
   { name: 'idle', keys: [], seconds: 1 },
@@ -75,17 +83,44 @@ const SCHEDULE = [
   { name: 'idle', keys: [], seconds: 2 },
 ];
 const FORWARD_FRACTION = 0.8; // of commanded speed x time, during W
-const STARTUP_SECONDS = 1.5; // not counted when a W starts from standing
+const STARTUP_SECONDS = 1.5; // not counted when a walk starts from a standstill
 const TURN_FRACTION = 0.5; // of commanded yaw rate x time, during W+A, A and D
-const BACKWARD_FRACTION = 0.5; // of commanded speed x time, during S
+// Of commanded speed x time, during S once under way. Bundle B (2026-11-18),
+// S held at level 3 (-0.6 m/s) from a standstill, 1.5-3 s after the key:
+// 0.72-0.87x (as the first walk after a reset, after turning in place either
+// way, after a stop; WebGPU). The schedule's S follows a walk and a turn in
+// place, which leave the body drifting forward: it backed 0.62 m in 3 s
+// (0.35x), 0.54-0.55 m of it (0.60-0.61x) after the first 1.5 s (WebGPU and
+// CPU).
+const BACKWARD_FRACTION = 0.5;
 const MAX_HESITANT_RESTARTS = 1; // restarts after a stop that miss the pace check
 
-// Key-masher: the seeds and the falls allowed in them. The shaping benchmark
-// (2026-11-16, WebGPU, 20 seeds x 45 s of this human model per candidate)
-// measured 2.7 falls per 10 min without command shaping; at that rate 60 s
-// expect 0.27 falls, and 3 or more would happen with probability 0.3 %.
+// The first walk after a reset: these keys, pressed FIRST_WALK_DELAYS (s)
+// after a reset, must walk FIRST_WALK_SECONDS without a fall. With the start
+// window [0.3, 0.5] they start at idle phase 0.3 (as does any press in the
+// first 0.15 s), at 0.4 (pressed at 0.2 s, at once) and at 0.3 one idle cycle
+// later (pressed at 0.3 s, held 0.35 s): three distinct starts per key set.
+const FIRST_WALK_KEYS = [['KeyW'], ['KeyW', 'KeyA'], ['KeyW', 'KeyD'], ['ShiftLeft', 'KeyW']];
+const FIRST_WALK_DELAYS = [0, 0.2, 0.3];
+const FIRST_WALK_SECONDS = 4;
+// Backing up first, at level 4 (-0.7 m/s, as level 5): pressed 0.22 s and
+// 0.25 s after a reset, START_WINDOW would start these at once, at idle phase
+// 0.44 and 0.5, where S+A fell (and S at 0.5); SHAPING.backStartWindow holds
+// them until 0.3 one idle cycle later (0.43 and 0.4 s). Pressed at once, they
+// start at 0.3.
+const FIRST_BACK_KEYS = [['KeyS'], ['KeyS', 'KeyA'], ['KeyS', 'KeyD']];
+const FIRST_BACK_DELAYS = [0, 0.22, 0.25];
+const FIRST_BACK_LEVEL = 3; // 0-based: level 4
+
+// Key-masher: the seeds and the falls allowed in them. Bundle B with its
+// command shaping fell 5.7 times per 10 min of this human model ("casual",
+// WebGPU, 140 seeds x 30 s pooled over the 2026-11-18 retune checks: 40 falls
+// in 70 min; the "stress" profile 7.8: 51 in 65 min; R2's benchmark: 2.7
+// without command shaping); at that rate 60 s expect 0.57 falls, and 4 or more
+// would happen with probability 0.3 %. On WebGPU seeds 0 and 1 fall twice,
+// both times in seed 0.
 const MASH_SEEDS = [0, 1];
-const MASH_MAX_FALLS = 2;
+const MASH_MAX_FALLS = 3;
 
 // Dragging: rendered geoms to grab (model ids, demo.visual.geom_ids), each by
 // its origin (local [0, 0, 0]), and the pull of the scripted drags.
@@ -423,7 +458,8 @@ describe('DemoSession end to end', { skip: SKIP }, () => {
       }
       simSeconds += steps * session.dt;
       const [vx, , wz] = command.twist;
-      const fromRest = rows.length === 0 || rows[rows.length - 1].command.action === 'idle';
+      // From a standstill: after standing or turning in place (no walking speed to carry over).
+      const fromRest = rows.length === 0 || rows[rows.length - 1].vx === 0;
       const skip = fromRest ? Math.round(STARTUP_SECONDS / session.dt) : 0;
       rows.push({
         ...seg, command, progress, turn, vx, wz, fromRest, restart: fromRest && walkedBefore,
@@ -436,7 +472,7 @@ describe('DemoSession end to end', { skip: SKIP }, () => {
     const wall = (performance.now() - started) / 1000;
 
     for (const r of rows) {
-      const steady = r.forward && r.fromRest
+      const steady = (r.forward || r.backward) && r.fromRest
         ? `; after ${STARTUP_SECONDS} s ${r.counted.toFixed(2)} m (${(r.counted / (r.vx * r.countedSeconds)).toFixed(2)}x)` : '';
       t.diagnostic(`${r.name.padEnd(10)} ${r.seconds} s  cmd vx ${r.vx.toFixed(2)} wz ${r.wz.toFixed(2)} (${r.command.label}): ` +
         `forward ${r.progress.toFixed(2)} m (${r.vx ? (r.progress / (r.vx * r.seconds)).toFixed(2) : '-'}x${steady}), ` +
@@ -459,8 +495,9 @@ describe('DemoSession end to end', { skip: SKIP }, () => {
         else assert.ok(r.counted >= want, message);
       }
       if (r.backward) {
-        const want = BACKWARD_FRACTION * r.vx * r.seconds; // vx < 0
-        assert.ok(r.progress <= want, `${label}: forward ${r.progress.toFixed(2)} m, want <= ${want.toFixed(2)} m`);
+        const want = BACKWARD_FRACTION * r.vx * r.countedSeconds; // vx < 0
+        const what = r.fromRest ? `after the first ${STARTUP_SECONDS} s` : 'over the segment';
+        assert.ok(r.counted <= want, `${label}: forward ${r.counted.toFixed(2)} m ${what}, want <= ${want.toFixed(2)} m`);
       }
       if (r.turns) {
         // same sign as the command, at least TURN_FRACTION of it
@@ -478,6 +515,54 @@ describe('DemoSession end to end', { skip: SKIP }, () => {
     assert.equal(rows[5].command.action, 'backward');
     assert.equal(rows[7].command.level, 4);
     assert.equal(rows[8].command.level, 0);
+  });
+
+  // The first walk after a reset: the touch pad's ▲ holds W from Start, and a
+  // walk held through a fall resumes the moment the walker resets. Out of the
+  // reset stance bundle B falls when its first stride starts early in the idle
+  // clip, so the start gate holds the first walk until the idle phase is in
+  // SHAPING.startWindow (see session.js).
+  // Backing up has a window of its own, SHAPING.backStartWindow.
+  for (const { label, keySets, delays, level, window } of [
+    { label: 'W, W+A, W+D, Shift+W', keySets: FIRST_WALK_KEYS, delays: FIRST_WALK_DELAYS, level: null, window: 'startWindow' },
+    { label: 'S, S+A, S+D at level 4', keySets: FIRST_BACK_KEYS, delays: FIRST_BACK_DELAYS, level: FIRST_BACK_LEVEL, window: 'backStartWindow' },
+  ]) test(`first walk after a reset: ${label} pressed at several delays never fall`, async (t) => {
+    const maxWait = Math.round(SHAPING.startWait / session.dt);
+    const [lo, hi] = SHAPING[window];
+    const fell = [];
+    for (const keys of keySets) {
+      const cells = [];
+      for (const delay of delays) {
+        session.reset();
+        session.setKeys([]);
+        session.level = level ?? session.ui.default_level;
+        const press = Math.round(delay / session.dt);
+        for (let k = 0; k < press; k++) await session.step();
+        session.setKeys(keys);
+        let held = null, phase = null, fall = null;
+        const off = session.on('fall', (e) => { if (fall === null) fall = e.time; });
+        for (let k = 0; k < Math.round(FIRST_WALK_SECONDS / session.dt) && fall === null; k++) {
+          const before = session.core.reference.phase; // the phase this step's request sees
+          await session.step();
+          if (held === null && !session.core.reference.idle) { held = k; phase = before; }
+        }
+        off();
+        const name = `${keys.join('+')} pressed ${delay} s after the reset`;
+        if (fall !== null) {
+          cells.push(`${delay} s: FELL`);
+          fell.push(`${name}: fell ${(fall - delay).toFixed(2)} s after the press`);
+          continue;
+        }
+        cells.push(`${delay} s: held ${(held * session.dt).toFixed(2)} s, phase ${phase.toFixed(2)}`);
+        assert.ok(held !== null && held <= maxWait, `${name}: held back ${held} steps (at most ${maxWait})`);
+        assert.ok(phase >= lo && phase <= hi, `${name}: started at idle phase ${phase}, outside [${lo}, ${hi}]`);
+      }
+      t.diagnostic(`first walk ${keys.join('+')}: ${cells.join('; ')}`);
+    }
+    assert.deepEqual(fell, [], `${fell.length} first walks fell`);
+    session.reset();
+    session.setKeys([]);
+    session.level = session.ui.default_level;
   });
 
   test('shaping: W while backing up stands first, says so, and starts within maxHold', async (t) => {

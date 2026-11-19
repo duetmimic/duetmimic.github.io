@@ -24,7 +24,11 @@
 //   {type: 'progress', loaded, total, stage, parts}
 //   {type: 'ready', info}                 followed by a first frame and status
 //   {type: 'frame', frame}                frame.buffer is transferred; frame.time
-//                                         (s) and frame.epoch, see below
+//                                         (s), frame.epoch, frame.initial and
+//                                         frame.sensorRows, see below; the
+//                                         extras frame.wrench (socket load on
+//                                         the limb) and frame.sensors (the
+//                                         OSL's sensor frame): render/frame.js
 //   {type: 'status', status}              about 4 per second, and on changes;
 //                                         status.perturb: {active, geom, body,
 //                                         id, force (N), maxForce, stretch (m)}
@@ -57,15 +61,49 @@
 // the time it draws plus newer ones, and posts each buffer back once it no
 // longer reads it. A step whose frame cannot go out (all in flight) is
 // skipped; the next free buffer carries the pose of that moment.
+//
+// frame.initial: true for the state a reset (or the load) starts from, before
+// its first control step (SimCore's steps === 0): the reset pose stands the
+// walker on the uncompressed socket piston with the foot pressed into the
+// floor, so its extras read an unloaded socket (about 26 N) and a 3 g IMU,
+// not a measurement of the walk. The page shows its pose, not its extras. A
+// step a reset discards (its inference was in flight) leaves that state, so
+// the frame after it is initial too.
+//
+// frame.sensorRows: the sensor charts need frame.sensors of every control
+// step, also of the steps whose frame did not go out. The worker keeps the
+// row of each skipped step (its frame.sensors values; ROW_CAPACITY at most,
+// the oldest dropped) and sends the rows, oldest first, with the next frame
+// of the same epoch: {times: Float64Array(n) (s, as frame.time), values:
+// Float32Array(n * width)}, every row older than the frame itself (whose own
+// row is frame.sensors), or null when there are none. So, with the frames,
+// every step's row reaches the page once, in order: none twice (a row is
+// dropped once a frame of its step or a later one went out), none of an older
+// epoch (a reset drops them: the page starts over) and none of an initial
+// state. The rows travel in the frame message rather than in one of their
+// own, so they cannot arrive after a newer frame (the page's history keeps
+// time order and drops an older row) and need no message of their own on the
+// usual path, where every frame goes out. A page that predates them ignores
+// both fields; frames without them (an older worker) are drawn as before.
 
 import { DemoSession } from './session.js';
 
 const STATUS_MS = 250;
 // The main thread holds about three frames for interpolation (the one before
 // the time it draws and those after); with 4 in flight, about 1 step in 5
-// found no free buffer at 60 fps (2026-11-16), with 6 every step's pose goes out.
+// found no free buffer at 60 fps (2026-11-16); with 6, at 60 fps and without
+// stalls, nearly every step's pose goes out. A page that draws less often
+// returns buffers in bursts and steps are skipped (2026-11-19, RTX 4090:
+// 0.1-5% of steps at 30-60 fps on a quiet machine, 11-25% at load 54-70, a
+// third at 20 fps, half at 15 fps; software rendering at 4-8 fps 35-40%).
+// The poses then come further apart (interpolated), and the skipped steps'
+// sensor rows go out with the next frame (frame.sensorRows).
 const MAX_IN_FLIGHT = 6;
 const RECYCLE_TIMEOUT_MS = 1000; // a frame not returned by then is written off
+// Sensor rows kept for frames that did not go out: 4 s of steps, more than the
+// 3 s the charts show (frames go out again RECYCLE_TIMEOUT_MS after the page
+// stopped returning them, so in practice they hold under 1 s).
+const ROW_CAPACITY = 400;
 const BATCH_BUDGET_MS = 30; // wall time per batch before yielding to messages
 const PROGRESS_MS = 100;
 
@@ -84,6 +122,7 @@ let lastReturnAt = 0;
 let frameOwed = false;
 let posted = { steps: -1, epoch: -1 }; // the pose last posted
 let lastStatusAt = -Infinity;
+let rows = null; // the sensor rows of skipped steps (keepRow), once loaded
 
 const now = () => performance.now();
 const post = (message, transfer) => self.postMessage(message, transfer || []);
@@ -141,6 +180,11 @@ async function init({ assetsBase, backend = 'auto' }) {
     if (event.type === 'reset') postFrame(true);
     if (event.type !== 'pause') sendStatus();
   });
+  const width = session.sensorCount;
+  rows = width > 0 ? {
+    width, epoch: -1, start: 0, count: 0,
+    steps: new Float64Array(ROW_CAPACITY), values: new Float32Array(ROW_CAPACITY * width),
+  } : null;
   session.setKeys(keys);
   for (const code of pendingLevels.splice(0)) session.handleKey(code);
   post({ type: 'ready', info: session.describe() });
@@ -165,18 +209,66 @@ function postFrame(force = false) {
   }
   if (!force && inFlight >= MAX_IN_FLIGHT) {
     frameOwed = true;
+    keepRow(steps, epoch); // its sensors go out with the next frame
     return false;
   }
   const out = session.extract();
   frameOwed = false;
   if (!out) return false; // the state cannot be drawn: the last frame stays up
-  out.frame.time = steps * session.dt;
-  out.frame.epoch = epoch;
+  const frame = out.frame;
+  frame.time = steps * session.dt;
+  frame.epoch = epoch;
+  frame.initial = session.initial;
+  frame.sensorRows = takeRows(steps, epoch);
   posted = { steps, epoch };
   if (inFlight === 0) lastReturnAt = t;
   inFlight += 1;
-  post({ type: 'frame', frame: out.frame }, out.transfer);
+  post({ type: 'frame', frame }, out.transfer);
   return true;
+}
+
+// The sensor row of the current state (step `steps` of `epoch`), whose frame
+// did not go out: kept for the next frame (see the header). Once per step; an
+// initial state or one that cannot be drawn has none.
+function keepRow(steps, epoch) {
+  const r = rows;
+  if (!r) return;
+  if (r.epoch !== epoch) { // a reset: the rows kept so far are of no use to the page
+    r.epoch = epoch;
+    r.start = 0;
+    r.count = 0;
+  }
+  if (r.count && r.steps[(r.start + r.count - 1) % ROW_CAPACITY] === steps) return; // kept already
+  const slot = r.count < ROW_CAPACITY ? (r.start + r.count) % ROW_CAPACITY : r.start;
+  if (!session.sensorRow(r.values, slot * r.width)) return;
+  r.steps[slot] = steps;
+  if (r.count < ROW_CAPACITY) r.count += 1;
+  else r.start = (r.start + 1) % ROW_CAPACITY; // full: the oldest row went
+}
+
+// frame.sensorRows for a frame of step `steps` of `epoch`: the rows kept for
+// it, oldest first, copied (the ring is reused), or null. A row of that step
+// itself is dropped (the frame's own sensors are it), as is everything of
+// another epoch; the ring is empty afterwards.
+function takeRows(steps, epoch) {
+  const r = rows;
+  if (!r || !r.count) return null;
+  let n = 0;
+  if (r.epoch === epoch) while (n < r.count && r.steps[(r.start + n) % ROW_CAPACITY] < steps) n += 1;
+  let out = null;
+  if (n) {
+    const w = r.width, dt = session.dt;
+    const times = new Float64Array(n), values = new Float32Array(n * w);
+    for (let i = 0; i < n; i++) {
+      const slot = (r.start + i) % ROW_CAPACITY;
+      times[i] = r.steps[slot] * dt; // as frame.time
+      for (let k = 0, from = slot * w, to = i * w; k < w; k++) values[to + k] = r.values[from + k];
+    }
+    out = { times, values };
+  }
+  r.start = 0;
+  r.count = 0;
+  return out;
 }
 
 function sendStatus() {

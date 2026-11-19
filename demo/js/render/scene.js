@@ -10,6 +10,9 @@
 //   view.render();                  // update and always draw (or render(dt), seconds)
 //   view.setCameraMode('follow');   // 'follow' | 'chase' | 'free'
 //   view.resetView();               // put the camera back on the default view
+//   view.setXray(true);             // the X-ray view (see below)
+//   view.setSensorMarkers(true);    // a glyph at each OSL sensor (see below)
+//   view.playTime;                  // simulated time of the pose on screen
 //   view.dispose();
 //
 // Pulling a body part (app.js drives it; the spring itself runs in the worker):
@@ -59,9 +62,52 @@
 // Render on demand: tick() draws only when the pose, the camera, the light or
 // the canvas size changed since the last drawing, so a paused walker with a
 // settled camera costs no GPU work.
+//
+// X-ray view (view.setXray(true), view.xray): the muscles are hidden and their
+// per-pose update is skipped (on the way back they are recomputed for the pose
+// on screen, also while paused); the human bones and the OSL socket become
+// see-through ghosts, unlit and darker toward their silhouette, that cast no
+// shadow (the socket's double-sided; the residual limb's bones, on the body
+// options.socketParent names (demo.sim.socket.parent), a little stronger and
+// blended after the socket, so the cup and the femur inside it both read);
+// the rest of the prosthesis (hardware, orange covers) is drawn exactly as
+// without it. Parts come from demo.visual.overlays.roles (else the material
+// categories). Two arrows show
+// the socket load on the residual limb, frame.wrench (render/frame.js): the
+// force and the moment the prosthesis applies to it at the socket body's
+// origin (demo.visual.overlays.socket, a point on its drawn geom), blended
+// between the two frames with the pose's alpha. MuJoCo's world is the scene's
+// (z up), so the wrench is drawn as it comes. Force: tail at the anchor along
+// F, xray.force.scale m per N up to its cap; moment: tail at the anchor along T
+// (right-hand rule), double-headed; each hidden below its `min`. They are drawn
+// last, over everything (no depth test), each over a white halo, cast no
+// shadow, are never picked and never glow; a dark dot marks the anchor. Frames
+// without a wrench (an older worker) draw no arrows. view.wrench is the
+// wrench as drawn, view.xrayInfo() the arrows as drawn (tests).
+// Materials: every robot mesh takes its material from one resolver (its role,
+// X-ray on or off, grabbed or not). The base materials are never changed; the
+// ghosts and the glowing variants are built by factories, never by clone() (a
+// ShaderMaterial has no emissive, and a clone loses onBeforeCompile). The
+// ghost, arrow and marker programs are compiled at construction, so the first
+// toggle does not stall.
+//
+// Sensor markers (view.setSensorMarkers(true), view.sensorMarkers; app.js
+// shows them with the sensor charts, ui/sensors.js): a glyph at each OSL
+// sensor of demo.visual.overlays.markers (encoders, IMU, ankle load cell, heel
+// and toe contact), on its drawn geom (geom_id + local, through the
+// interpolated mesh matrix), in its group's colour and glyph
+// (ui/sensors.js SENSOR_GROUPS): a white ring around a coloured core, a
+// constant size on screen, over everything (no depth test), never picked, no
+// shadow. The heel and toe glyphs are open rings that fill and grow with
+// their contact force (frame.sensors, blended like the pose). With or without
+// the X-ray view. view.sensors is the sensor frame as drawn,
+// view.sensorMarkersInfo() the markers as drawn (tests). view.playTime is the
+// simulated time of the pose on screen, for charts that keep in step with it.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MARKER_GROUPS, SENSOR_GROUPS } from '../ui/sensors.js';
+import { ACCENT, XRAY_COLORS } from './palette.js';
 
 const DEFAULTS = {
   maxPixelRatio: 2,
@@ -88,9 +134,57 @@ const DEFAULTS = {
   // The pull overlay (sRGB hex): line, its halo and the dot on the body; the
   // line widens from width[0] to width[1] CSS px as the force reaches full
   // (setPerturb's maxForce, else forceRef newtons). Then the grabbed body's glow.
-  pull: { line: '#c2410c', halo: '#ffffff', grab: '#f26a1b', width: [2.25, 4.5], forceRef: 400 },
-  glow: { color: '#f26a1b', intensity: 0.35 },
+  pull: { line: '#c2410c', halo: '#ffffff', grab: ACCENT, width: [2.25, 4.5], forceRef: 400 },
+  glow: { color: ACCENT, intensity: 0.35 },
+  // X-ray view (see the header). Ghosts (sRGB hex): `core` is the opacity of a
+  // surface facing the camera, `rim` at its silhouette, `power` how fast it
+  // rises toward the rim; a grabbed ghost takes glow.color as its rim colour.
+  // Arrows: scale in m per N (force) and per N m (moment), cap in m, min (N,
+  // N m) below which the arrow is hidden. Colours: dataviz-validated as a pair
+  // on the light background (also against colour-vision deficiency); not
+  // orange (covers, accent, pull line) and far from the slate ghosts
+  // (render/palette.js XRAY_COLORS, which the sensor colours are checked
+  // against).
+  xray: {
+    bone: { color: XRAY_COLORS.bone, rimColor: XRAY_COLORS.boneRim, core: 0.07, rim: 0.62, power: 2.0 },
+    socket: { color: XRAY_COLORS.socket, rimColor: XRAY_COLORS.socketRim, core: 0.05, rim: 0.8, power: 1.3 },
+    // The residual limb's bones (the socket's parent body, options.socketParent):
+    // a little stronger, drawn after the socket so they read inside the cup.
+    residual: { color: XRAY_COLORS.residual, rimColor: XRAY_COLORS.residualRim, core: 0.1, rim: 0.85, power: 1.7 },
+    force: { color: XRAY_COLORS.force, scale: 0.0005, cap: 0.8, min: 3 },
+    moment: { color: XRAY_COLORS.moment, scale: 0.004, cap: 0.6, min: 0.3 },
+    halo: XRAY_COLORS.halo,
+    dot: XRAY_COLORS.dot,
+  },
+  // Sensor markers (see the header), sizes in CSS px: each glyph's outer
+  // diameter (`size`, by glyph), its white ring and the faint dark edge
+  // around it; a contact glyph grows by `grow` and fills as its force nears
+  // `full` N (open below `touch` N). colors: overrides per sensor group of
+  // ui/sensors.js SENSOR_GROUPS (the charts' colours). Where glyphs overlap
+  // on screen (seen from behind, the leg's sensors line up), the contact
+  // glyphs, the only ones that change, lie on top (MARKER_LAYER). A framed
+  // view (setFraming) draws them `scale` times as large, within `minScale`
+  // and 1, as the walker is drawn smaller (ring and edge too; below 0.7 a
+  // square's coloured core would be all antialiasing).
+  sensors: {
+    size: { circle: 13.5, diamond: 16, square: 12.5 },
+    ring: 1.75, edge: 0.75,
+    contact: { grow: 7, full: 800, touch: 2 },
+    minScale: 0.7,
+    colors: null,
+  },
 };
+
+// X-ray arrows (m): shaft radius and head length grow with the arrow's length
+// within [min, max]; the head's radius is a multiple of the shaft's; the halo
+// adds this much around each part; the anchor dot's radius.
+const ARROW_SHAFT = { k: 0.02, min: 0.0035, max: 0.0065 };
+const ARROW_HEAD = { k: 0.2, min: 0.02, max: 0.05, radius: 2.4 };
+const ARROW_HALO = { k: 0.4, min: 0.0025 };
+const ARROW_DOT = 0.011;
+const DOUBLE_HEAD_STEP = 0.62; // a moment's second head sits this many head lengths behind the first
+const RENDER_ORDER = { moment: 40, force: 42, dot: 44 }; // halo at n, colour at n + 1
+const GHOST_ORDER = { bone: 0, socket: 1, residual: 2 };  // blending order of the ghosts
 
 // Picking (see the header).
 const PICK_CHUNK = 128;        // triangles per box
@@ -122,6 +216,7 @@ const DRAW_EPS_POS = 2e-4;  // m
 const DRAW_EPS_ROT = 1e-8;  // 1 - |q.q'| (about 3e-4 rad)
 
 const GEOM_SPHERE = 2, GEOM_CAPSULE = 3, GEOM_ELLIPSOID = 4, GEOM_CYLINDER = 5, GEOM_BOX = 6, GEOM_MESH = 7;
+const UP_Y = new THREE.Vector3(0, 1, 0); // the arrows' own axis
 
 function srgb(rgb) {
   return new THREE.Color().setRGB(rgb[0], rgb[1], rgb[2], THREE.SRGBColorSpace);
@@ -190,6 +285,227 @@ float filteredChecker( vec2 p ) {
   };
   material.customProgramCacheKey = () => 'duet-checker-floor';
   return material;
+}
+
+// A robot material from its demo.visual.materials entry; with `glow`
+// ({color, intensity}) the grabbed body's variant, built the same way (never
+// cloned: see the header).
+function standardMaterial(spec, glow = null) {
+  const opacity = spec.opacity ?? 1;
+  const material = new THREE.MeshStandardMaterial({
+    name: glow ? `${spec.name}-lit` : spec.name,
+    color: srgb(spec.rgb),
+    roughness: spec.roughness ?? 0.6,
+    metalness: spec.metalness ?? 0,
+    transparent: opacity < 1,
+    opacity,
+    depthWrite: opacity >= 1,
+  });
+  if (glow) {
+    material.emissive.set(glow.color);
+    material.emissiveIntensity = glow.intensity;
+  }
+  return material;
+}
+
+// X-ray ghost: unlit, see-through, darker and more opaque toward the
+// silhouette (|N.V| -> 0), then tone-mapped, sRGB-encoded and fogged like the
+// lit scene. Normals are flipped by abs(), so back faces of a double-sided
+// ghost read the same.
+const GHOST_VERTEX = /* glsl */ `
+#include <common>
+#include <fog_pars_vertex>
+varying vec3 vGhostNormal;
+varying vec3 vGhostView;
+void main() {
+  vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+  vGhostNormal = normalMatrix * normal;
+  vGhostView = -mvPosition.xyz;
+  gl_Position = projectionMatrix * mvPosition;
+  #include <fog_vertex>
+}`;
+
+const GHOST_FRAGMENT = /* glsl */ `
+uniform vec3 uColor;
+uniform vec3 uRimColor;
+uniform float uCore;
+uniform float uRim;
+uniform float uPower;
+#include <common>
+#include <fog_pars_fragment>
+varying vec3 vGhostNormal;
+varying vec3 vGhostView;
+void main() {
+  float facing = abs( dot( normalize( vGhostNormal ), normalize( vGhostView ) ) );
+  float rim = pow( 1.0 - facing, uPower );
+  gl_FragColor = vec4( mix( uColor, uRimColor, rim ), mix( uCore, uRim, rim ) );
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+  #include <fog_fragment>
+}`;
+
+// A ghost material for one look ({color, rimColor, core, rim, power}, colours
+// sRGB hex). glow: the grabbed variant's rim colour. Each look and variant is
+// its own instance of the same program. `emissive` (black, or the glow colour)
+// mirrors the lit materials', so callers can ask any drawn material whether
+// it glows.
+function ghostMaterial(look, { doubleSided = false, glow = null, name = 'ghost' } = {}) {
+  const material = new THREE.ShaderMaterial({
+    name: glow ? `${name}-lit` : name,
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+      uColor: { value: new THREE.Color(look.color) },
+      uRimColor: { value: new THREE.Color(glow || look.rimColor || look.color) },
+      uCore: { value: glow ? Math.max(look.core, 0.12) : look.core },
+      uRim: { value: glow ? Math.max(look.rim, 0.8) : look.rim },
+      uPower: { value: look.power ?? 2 },
+    }]),
+    vertexShader: GHOST_VERTEX,
+    fragmentShader: GHOST_FRAGMENT,
+    transparent: true,
+    depthWrite: false,
+    fog: true,
+    side: doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+  });
+  material.emissive = new THREE.Color(glow || 0x000000);
+  return material;
+}
+
+// The X-ray overlay materials: flat colour (as the legend's swatches), over
+// everything and in the transparent pass, so after the ghosts.
+function overlayMaterial(color, name) {
+  return new THREE.MeshBasicMaterial({
+    name, color: new THREE.Color(color), transparent: true, opacity: 1,
+    depthTest: false, depthWrite: false, toneMapped: false, fog: false,
+  });
+}
+
+// An arrow along +y of its group: a shaft and `heads` cones (2: a moment's
+// double head), each part over a halo copy drawn just before it (renderOrder
+// `order`, the colour at order + 1). Unit geometries, sized by layoutArrow().
+function arrowObject(geometry, material, haloMaterial, heads, order, cfg) {
+  const group = new THREE.Group();
+  group.visible = false;
+  const parts = [];
+  const add = (kind) => {
+    const halo = new THREE.Mesh(kind === 'shaft' ? geometry.shaft : geometry.head, haloMaterial);
+    const mesh = new THREE.Mesh(halo.geometry, material);
+    halo.renderOrder = order;
+    mesh.renderOrder = order + 1;
+    group.add(halo, mesh);
+    parts.push({ kind, mesh, halo });
+  };
+  add('shaft');
+  for (let i = 0; i < heads; i++) add('head');
+  return { group, parts, heads, cfg, length: 0 };
+}
+
+// Size an arrow's parts for a length L (m): the shaft from the tail to the
+// last head, the heads ending at L; a short arrow gets shorter heads.
+function layoutArrow(arrow, L) {
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const r = clamp(ARROW_SHAFT.k * L, ARROW_SHAFT.min, ARROW_SHAFT.max);
+  const span = 1 + (arrow.heads - 1) * DOUBLE_HEAD_STEP; // head lengths the heads cover
+  const h = Math.min(clamp(ARROW_HEAD.k * L, ARROW_HEAD.min, ARROW_HEAD.max), (0.6 * L) / span);
+  const hr = Math.min(ARROW_HEAD.radius * r, 0.55 * h + r);
+  const e = Math.max(ARROW_HALO.min, ARROW_HALO.k * r); // halo width
+  const shaft = Math.max(0, L - span * h + 0.25 * h); // runs a little into the last head
+  let head = 0;
+  for (const { kind, mesh, halo } of arrow.parts) {
+    if (kind === 'shaft') {
+      mesh.position.set(0, 0, 0);
+      mesh.scale.set(r, shaft, r);
+      halo.position.set(0, -e, 0);
+      halo.scale.set(r + e, shaft + e, r + e);
+    } else {
+      const base = L - h - head * DOUBLE_HEAD_STEP * h;
+      mesh.position.set(0, base, 0);
+      mesh.scale.set(hr, h, hr);
+      halo.position.set(0, base - 0.8 * e, 0);
+      halo.scale.set(hr + 1.9 * e, h + 2.4 * e, hr + 1.9 * e);
+      head += 1;
+    }
+  }
+  arrow.length = L;
+}
+
+// Sensor marker glyphs: point sprites of a constant size on screen (aSize CSS
+// px x uScale device px each); the glyph by aShape (0 circle, 1 diamond, 2
+// rounded square), from the outside in: a faint dark edge, a white ring, a
+// core in aColor. aFill < 1 (a contact glyph) leaves a coloured rim around a
+// light centre that fills with aFill. No tone mapping and no fog: the
+// colours are the charts' (sRGB out, as the overlay arrows).
+const MARKER_SHAPES = { circle: 0, diamond: 1, square: 2 };
+const MARKER_ORDER = 50; // over the X-ray overlay (40-45)
+// Drawn in this order, the last on top: the static glyphs first, the contact
+// glyphs (they fill and grow with the load) over them. Seen from behind, the
+// ankle encoder lines up with the heel and the load cell with the toe.
+const MARKER_LAYER = { encoder: 0, imu: 1, load_cell: 2, contact: 3 };
+
+const MARKER_VERTEX = /* glsl */ `
+uniform float uScale;
+attribute vec3 aColor;
+attribute float aSize;
+attribute float aShape;
+attribute float aFill;
+varying vec3 vColor;
+varying float vShape;
+varying float vFill;
+varying float vSize;
+void main() {
+  gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+  vSize = aSize * uScale;
+  gl_PointSize = vSize;
+  vColor = aColor;
+  vShape = aShape;
+  vFill = aFill;
+}`;
+
+const MARKER_FRAGMENT = /* glsl */ `
+uniform float uScale;
+uniform float uRing;
+uniform float uEdge;
+varying vec3 vColor;
+varying float vShape;
+varying float vFill;
+varying float vSize;
+#include <common>
+void main() {
+  vec2 p = gl_PointCoord * 2.0 - 1.0;
+  vec2 a = abs( p );
+  float d = vShape < 0.5 ? length( p )
+    : vShape < 1.5 ? a.x + a.y
+    : pow( pow( a.x, 5.0 ) + pow( a.y, 5.0 ), 0.2 );
+  float px = 2.0 / vSize;                       // one device pixel, in sprite units
+  float outer = 1.0 - 0.5 * px;                 // the glyph's outside (antialiased inward)
+  float edge = outer - uEdge * uScale * px;     // the white ring's outside: a faint dark edge beyond
+  float core = edge - uRing * uScale * px;      // the coloured core's outside
+  float rim = core - 1.5 * uScale * px;         // inside a contact glyph's rim: its fill
+  float alpha = 1.0 - smoothstep( outer - px, outer, d );
+  if ( alpha <= 0.0 ) discard;
+  vec3 light = mix( vec3( 1.0 ), vColor, 0.2 );
+  vec3 inside = mix( vColor, mix( light, vColor, vFill ), smoothstep( rim, rim - px, d ) * step( vFill, 0.999 ) );
+  vec3 c = mix( vec3( 1.0 ), inside, smoothstep( core, core - px, d ) );
+  float dark = smoothstep( edge - 0.5 * px, edge + 0.5 * px, d );
+  gl_FragColor = vec4( mix( c, vec3( 0.0 ), dark ), alpha * mix( 1.0, 0.3, dark ) );
+  #include <colorspace_fragment>
+}`;
+
+function markerMaterial(cfg, scale) {
+  return new THREE.ShaderMaterial({
+    name: 'sensor-markers',
+    uniforms: {
+      uScale: { value: scale },
+      uRing: { value: cfg.ring },
+      uEdge: { value: cfg.edge },
+    },
+    vertexShader: MARKER_VERTEX,
+    fragmentShader: MARKER_FRAGMENT,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+    fog: false,
+  });
 }
 
 function primitiveGeometry(type, size) {
@@ -433,15 +749,8 @@ export class DemoRenderer {
     scene.add(floor);
 
     // Robot: one mesh per drawn geom, posed from the frame's geom_xpos/xmat.
-    const materials = (visual.materials || []).map((m) => new THREE.MeshStandardMaterial({
-      name: m.name,
-      color: srgb(m.rgb),
-      roughness: m.roughness ?? 0.6,
-      metalness: m.metalness ?? 0,
-      transparent: (m.opacity ?? 1) < 1,
-      opacity: m.opacity ?? 1,
-      depthWrite: (m.opacity ?? 1) >= 1,
-    }));
+    const specs = (visual.materials || []).length ? visual.materials : [{ name: 'bone', category: 'bone', rgb: [0.86, 0.84, 0.8] }];
+    const materials = specs.map((m) => standardMaterial(m));
     const meshGeoms = [];
     const nMesh = arrays.mesh_id.length;
     for (let i = 0; i < nMesh; i++) {
@@ -466,21 +775,28 @@ export class DemoRenderer {
     const robot = this.robot = new THREE.Group();
     robot.visible = false;
     this.geomMeshes = [];
+    // Per drawn geom: its base material (index into specs) and shadow flags,
+    // what the material resolver restores (_refreshMaterials).
+    this._base = [];
     for (let i = 0; i < geomIds.length; i++) {
       const m = arrays.geom_mesh[i];
       const geometry = m >= 0 ? meshGeoms[m]
         : primitiveGeometry(arrays.geom_type[i], arrays.geom_size.subarray(3 * i, 3 * i + 3));
-      const material = materials[arrays.geom_material[i]] || materials[0];
+      const k = materials[arrays.geom_material[i]] ? arrays.geom_material[i] : 0;
+      const material = materials[k];
       const mesh = new THREE.Mesh(geometry || new THREE.BufferGeometry(), material);
       mesh.matrixAutoUpdate = false;
       mesh.castShadow = true;
       mesh.receiveShadow = !material.transparent;
       robot.add(mesh);
       this.geomMeshes.push(mesh);
+      this._base.push({ material, spec: k, castShadow: mesh.castShadow, receiveShadow: mesh.receiveShadow });
     }
     scene.add(robot);
     this.geomCount = geomIds.length;
     this._materials = materials;
+    this._specs = specs;
+    this.roles = this._geomRoles(visual, arrays.geom_material, specs);
 
     // Muscles: one InstancedMesh of stretched unit capsules.
     const mus = visual.muscles || {};
@@ -527,7 +843,41 @@ export class DemoRenderer {
     this._overlay = pullOverlay(host, opts.pull);
     this._pull = null;        // {index, local, target, force, forceRef} while a body part is pulled
     this._pullForce = 0;      // smoothed force (N) for the line width
-    this._glow = { key: null, meshes: [], materials: new Map() };
+    this._glow = { key: null, lit: new Map() }; // lit: spec index -> its glowing material
+
+    // X-ray view: the ghosts (plain and grabbed, per ghosted role), the socket
+    // load arrows and the anchor dot (one group in the scene, world space).
+    const xc = { ...DEFAULTS.xray, ...(opts.xray || {}) }; // options.xray: overrides per key
+    opts.xray = xc;
+    const glowColor = opts.glow.color;
+    const ghosts = (look, name, doubleSided = false) => ({
+      plain: ghostMaterial(look, { name, doubleSided }),
+      lit: ghostMaterial(look, { name, doubleSided, glow: glowColor }),
+    });
+    this._ghosts = {
+      bone: ghosts(xc.bone, 'ghost-bone'),
+      socket: ghosts(xc.socket, 'ghost-socket', true),
+      residual: ghosts(xc.residual, 'ghost-residual'),
+    };
+    // Bones of the residual limb: on the socket's parent body (demo.sim.socket.parent).
+    const parent = Number.isInteger(opts.socketParent) ? opts.socketParent : null;
+    this._residual = this._geomBody.map((b, i) => parent !== null && b === parent && this.roles[i] === 'bone');
+    this._xray = false;
+    this._xrayView = this._buildXrayView(visual, xc);
+    scene.add(this._xrayView.group);
+    this._wrench = new Float64Array(6); // [Fx, Fy, Fz, Tx, Ty, Tz] as drawn (blended like the pose)
+    this._wrenchOk = false;   // the pose on screen came with a wrench
+
+    // Sensor markers: one point sprite per demo.visual.overlays.markers entry,
+    // placed on its drawn geom at every pose; the sensor frame as drawn
+    // (blended like the pose) sizes the contact glyphs.
+    const sc = { ...DEFAULTS.sensors, ...(opts.sensors || {}) };
+    opts.sensors = sc;
+    this._markers = this._buildSensorMarkers(visual, sc);
+    scene.add(this._markers.points);
+    this._sensorsOn = false;
+    this._sensorValues = null; // frame.sensors as drawn (Float64Array), when the frames carry it
+    this._sensorsOk = false;
 
     // State.
     this._frame = null;       // untimed frame not yet applied
@@ -552,7 +902,11 @@ export class DemoRenderer {
     this._redraw = true;      // something changed that the camera state does not show
     this._drawn = new Float64Array(10).fill(Infinity); // camera position, quaternion and light at the last drawing
     this._warned = false;
+    this._musclesStale = false; // the muscle instances are not of the pose on screen (skipped in X-ray)
+    this._untimed = null;     // an untimed frame on screen, kept while muscles are stale (to restore them)
+    this._framing = null;     // setFraming(): {scale, dx, dy} | null
 
+    this._prewarm();
     this.resize();
     this._observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => this.resize()) : null;
     if (this._observer) this._observer.observe(host);
@@ -572,6 +926,170 @@ export class DemoRenderer {
       lut[3 * i] = c.r; lut[3 * i + 1] = c.g; lut[3 * i + 2] = c.b;
     }
     return lut;
+  }
+
+  // Each drawn geom's part: 'bone' | 'socket' | 'hardware' | 'cover', from
+  // demo.visual.overlays.roles, else from its material's category (exports
+  // before the overlays).
+  _geomRoles(visual, geomMaterial, specs) {
+    const roles = visual.overlays && visual.overlays.roles;
+    const known = new Set(['bone', 'socket', 'hardware', 'cover']);
+    if (Array.isArray(roles) && roles.length === this.geomCount && roles.every((r) => known.has(r))) return roles.slice();
+    const byCategory = { socket: 'socket', hardware: 'hardware', osl_cover: 'cover', cover: 'cover' };
+    return Array.from({ length: this.geomCount }, (_, i) => {
+      const spec = specs[geomMaterial[i]] || specs[0];
+      return byCategory[spec.category || spec.name] || 'bone';
+    });
+  }
+
+  // The X-ray overlay: arrows for the force and the moment and the anchor dot,
+  // in one group (world space); the anchor from demo.visual.overlays.socket
+  // (null without it: no overlay is drawn).
+  _buildXrayView(visual, xc) {
+    const s = visual.overlays && visual.overlays.socket;
+    const index = s ? this._geomIndexOf(s) : -1;
+    const geometry = {
+      shaft: new THREE.CylinderGeometry(1, 1, 1, 16, 1).translate(0, 0.5, 0), // y from 0 to 1
+      head: new THREE.ConeGeometry(1, 1, 24, 1).translate(0, 0.5, 0),         // base at y 0, tip at 1
+      dot: new THREE.SphereGeometry(1, 20, 14),
+    };
+    const halo = overlayMaterial(xc.halo, 'xray-halo');
+    const materials = {
+      halo,
+      force: overlayMaterial(xc.force.color, 'xray-force'),
+      moment: overlayMaterial(xc.moment.color, 'xray-moment'),
+      dot: overlayMaterial(xc.dot, 'xray-dot'),
+    };
+    const group = new THREE.Group();
+    group.name = 'xray-overlay';
+    group.visible = false;
+    const moment = arrowObject(geometry, materials.moment, halo, 2, RENDER_ORDER.moment, xc.moment);
+    const force = arrowObject(geometry, materials.force, halo, 1, RENDER_ORDER.force, xc.force);
+    const dotHalo = new THREE.Mesh(geometry.dot, halo);
+    const dot = new THREE.Mesh(geometry.dot, materials.dot);
+    dotHalo.renderOrder = RENDER_ORDER.dot;
+    dot.renderOrder = RENDER_ORDER.dot + 1;
+    dot.scale.setScalar(ARROW_DOT);
+    dotHalo.scale.setScalar(ARROW_DOT + ARROW_HALO.min + 0.001);
+    group.add(moment.group, force.group, dotHalo, dot);
+    group.traverse((o) => { o.castShadow = false; o.receiveShadow = false; });
+    return {
+      group, force, moment, dot, dotHalo, geometry, materials,
+      socket: index >= 0 ? { index, local: Array.from(s.local || [0, 0, 0]) } : null,
+      anchor: new THREE.Vector3(),
+      dir: new THREE.Vector3(),
+    };
+  }
+
+  // The sensor markers (see the header): their entries (overlays.markers on a
+  // drawn geom), one THREE.Points of them and its per-point attributes.
+  _buildSensorMarkers(visual, cfg) {
+    const groups = { ...SENSOR_GROUPS };
+    for (const [key, color] of Object.entries(cfg.colors || {})) {
+      if (groups[key]) groups[key] = { ...groups[key], color };
+    }
+    const list = [];
+    for (const m of (visual.overlays && visual.overlays.markers) || []) {
+      const index = this._geomIndexOf(m);
+      if (index < 0 || !Array.isArray(m.local)) continue;
+      const group = MARKER_GROUPS[m.kind] || 'imu';
+      const g = groups[group] || SENSOR_GROUPS.imu;
+      const glyph = MARKER_SHAPES[g.glyph] !== undefined ? g.glyph : 'circle';
+      list.push({
+        key: m.key, label: m.label || m.key, kind: m.kind, group, glyph, color: g.color, index,
+        geomId: this._geomIds[index], local: Array.from(m.local),
+        channel: m.kind === 'contact' && Array.isArray(m.channels) && m.channels.length ? m.channels[0] : -1,
+        size: cfg.size[glyph] || cfg.size.circle,
+      });
+    }
+    // One draw call, no depth test: the later point lies on top.
+    list.sort((p, q) => (MARKER_LAYER[p.kind] ?? 9) - (MARKER_LAYER[q.kind] ?? 9));
+    const n = Math.max(1, list.length);
+    const geometry = new THREE.BufferGeometry();
+    const attr = (size, usage) => {
+      const a = new THREE.BufferAttribute(new Float32Array(n * size), size);
+      if (usage) a.setUsage(THREE.DynamicDrawUsage);
+      return a;
+    };
+    const position = attr(3, true), color = attr(3), size = attr(1, true), shape = attr(1), fill = attr(1, true);
+    const c = new THREE.Color();
+    list.forEach((mk, i) => {
+      c.set(mk.color); // sRGB hex -> the working (linear) space; the shader encodes it back
+      color.array[3 * i] = c.r; color.array[3 * i + 1] = c.g; color.array[3 * i + 2] = c.b;
+      size.array[i] = mk.size;
+      shape.array[i] = MARKER_SHAPES[mk.glyph];
+      fill.array[i] = mk.channel >= 0 ? 0 : 1;
+    });
+    geometry.setAttribute('position', position);
+    geometry.setAttribute('aColor', color);
+    geometry.setAttribute('aSize', size);
+    geometry.setAttribute('aShape', shape);
+    geometry.setAttribute('aFill', fill);
+    geometry.setDrawRange(0, list.length);
+    const material = markerMaterial(cfg, this.renderer.getPixelRatio());
+    const points = new THREE.Points(geometry, material);
+    points.name = 'sensor-markers';
+    points.frustumCulled = false;
+    points.renderOrder = MARKER_ORDER;
+    points.visible = false;
+    points.castShadow = false;
+    points.receiveShadow = false;
+    return { list, points, geometry, material, position, size, fill };
+  }
+
+  // The drawn geom (index into geom_ids) of an overlays entry: by its MuJoCo
+  // geom_id, else its index; -1 if neither matches.
+  _geomIndexOf(entry) {
+    if (Number.isInteger(entry.geom_id) && this._geomIndex && this._geomIndex.has(entry.geom_id)) return this._geomIndex.get(entry.geom_id);
+    if (Number.isInteger(entry.geom_id)) {
+      const i = this.visual.geom_ids.indexOf(entry.geom_id);
+      if (i >= 0) return i;
+    }
+    return Number.isInteger(entry.geom) && entry.geom >= 0 && entry.geom < this.geomCount ? entry.geom : -1;
+  }
+
+  // Compile every program the views can need now, behind the loader, so no
+  // toggle stalls on a shader link. First one drawing of the scene as it is
+  // without X-ray (the robot with its base materials, the muscles, the
+  // floor) inside a 1-pixel scissor, so nothing shows: it builds their
+  // programs and the shadow pass's depth programs (the muscles' own included),
+  // which renderer.compile() leaves out; a session that starts in the X-ray
+  // view (?xray=1) would otherwise build them at its first X. Then the X-ray
+  // ghosts, the overlay and the markers, which no mesh carries yet, compiled
+  // against this scene's lights and fog.
+  _prewarm() {
+    const renderer = this.renderer, robot = this.robot, muscles = this.muscles;
+    const shown = robot.visible, count = muscles.count;
+    try {
+      robot.visible = true;
+      muscles.setMatrixAt(0, new THREE.Matrix4().makeScale(0, 0, 0)); // drawn, but no pixel
+      muscles.instanceMatrix.needsUpdate = true;
+      muscles.count = 1;
+      renderer.setScissor(0, 0, 1, 1);
+      renderer.setScissorTest(true);
+      renderer.render(this.scene, this.camera);
+    } catch (error) {
+      console.warn('DemoRenderer: could not prerender the scene', error);
+    } finally {
+      renderer.setScissorTest(false);
+      robot.visible = shown;
+      muscles.count = count;
+    }
+    const warm = new THREE.Scene();
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]), 3));
+    const v = this._xrayView;
+    for (const material of [this._ghosts.bone.plain, this._ghosts.socket.plain, v.materials.halo, v.materials.force]) {
+      warm.add(new THREE.Mesh(geometry, material));
+    }
+    warm.add(new THREE.Points(this._markers.geometry, this._markers.material));
+    try {
+      this.renderer.compile(warm, this.camera, this.scene);
+    } catch (error) {
+      console.warn('DemoRenderer: could not precompile the X-ray materials', error);
+    }
+    geometry.dispose();
   }
 
   // A frame to show (see the header): timed frames are queued for playback,
@@ -648,9 +1166,88 @@ export class DemoRenderer {
     if (this.controls) this.controls.update();
   }
 
-  setMusclesVisible(on) {
-    this.muscles.visible = !!on;
+  // X-ray view on or off (see the header). Takes effect at the next drawing,
+  // on the pose on screen: while paused, one drawing.
+  setXray(on) {
+    on = !!on;
+    if (on === this._xray) return;
+    this._xray = on;
+    if (on) this.muscles.visible = false;
+    else this._restoreMuscles();
+    this._refreshMaterials();
+    this._updateArrows();
     this._redraw = true;
+  }
+
+  get xray() { return this._xray; }
+
+  // Sensor markers on or off (see the header). Takes effect at the next
+  // drawing, on the pose on screen: while paused, one drawing.
+  setSensorMarkers(on) {
+    on = !!on;
+    if (on === this._sensorsOn) return;
+    this._sensorsOn = on;
+    this._updateMarkers();
+    this._redraw = true;
+  }
+
+  get sensorMarkers() { return this._sensorsOn; }
+
+  // The simulated time (s) of the pose on screen (the playback clock of timed
+  // frames), or null before one: charts drawn at it keep in step with the pose.
+  get playTime() { return this._play; }
+
+  // The OSL sensor frame as drawn now (frame.sensors blended like the pose),
+  // or null when the frames carry none.
+  get sensors() { return this._sensorsOk ? Array.from(this._sensorValues) : null; }
+
+  // The sensor markers as drawn now, read back from the attributes the GPU
+  // gets (for tests): [{key, label, kind, group, glyph, color, geom_id, local,
+  // shown, world ([x, y, z]), size (CSS px as drawn: the glyph's size times
+  // the framing's), fill (1 filled; a contact glyph 0 open .. 1), channel
+  // (frame.sensors index of a contact, else -1), layer (drawing order: a
+  // higher one lies on top)}].
+  sensorMarkersInfo() {
+    const m = this._markers, k = m.scale ?? 1;
+    return m.list.map((mk, i) => ({
+      key: mk.key, label: mk.label, kind: mk.kind, group: mk.group, glyph: mk.glyph, color: mk.color,
+      geom_id: mk.geomId, local: mk.local.slice(), shown: m.points.visible,
+      world: Array.from(m.position.array.subarray(3 * i, 3 * i + 3)),
+      size: m.size.array[i] * k, fill: m.fill.array[i], channel: mk.channel, layer: i,
+    }));
+  }
+
+  // The socket wrench as drawn now ([Fx, Fy, Fz, Tx, Ty, Tz], N and N m, world
+  // axes; blended like the pose), or null when the frames carry none.
+  get wrench() { return this._wrenchOk ? Array.from(this._wrench) : null; }
+
+  // The X-ray overlay as drawn now, read back from the arrow meshes (for
+  // tests): {on, wrench, anchor ([x, y, z] world, or null before the first
+  // pose), force and moment: {shown, origin, direction (unit), length (m), tip}}.
+  xrayInfo() {
+    const v = this._xrayView;
+    const out = { on: this._xray, wrench: this.wrench, anchor: null, force: null, moment: null };
+    if (!v.socket || !this._hasFrame) return out;
+    out.anchor = this._toWorld(v.socket.index, v.socket.local);
+    v.group.updateMatrixWorld(true);
+    for (const key of ['force', 'moment']) {
+      const arrow = v[key];
+      const shown = v.group.visible && arrow.group.visible;
+      const origin = new THREE.Vector3().setFromMatrixPosition(arrow.group.matrixWorld);
+      // The tip as drawn: the first head's apex (unit cone: y = 1).
+      const head = arrow.parts.find((p) => p.kind === 'head').mesh;
+      const tip = new THREE.Vector3(0, 1, 0).applyMatrix4(head.matrixWorld);
+      const d = tip.clone().sub(origin);
+      const length = shown ? d.length() : 0;
+      out[key] = {
+        shown,
+        origin: origin.toArray(),
+        direction: length > 0 ? d.divideScalar(length).toArray() : null,
+        length,
+        tip: shown ? tip.toArray() : null,
+      };
+    }
+    return out;
   }
 
   resize() {
@@ -659,8 +1256,57 @@ export class DemoRenderer {
     this.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, this.options.maxPixelRatio));
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    this._applyFraming(w, h); // updates the projection
+    this._scaleMarkers();
     this._redraw = true;
+  }
+
+  // The glyphs' size: their CSS size at the renderer's pixel ratio, times the
+  // framing's scale within options.sensors.minScale and 1.
+  _scaleMarkers() {
+    const f = this._framing, min = this.options.sensors.minScale ?? 1;
+    const k = f ? Math.min(1, Math.max(min, f.scale)) : 1;
+    this._markers.scale = k;
+    this._markers.material.uniforms.uScale.value = this.renderer.getPixelRatio() * k;
+  }
+
+  // Framing (app.js: where panels would cover the walker, on portrait phones
+  // and tablets): the picture drawn `scale` (<= 1) times its size about the
+  // canvas centre, then moved by (dx, dy) CSS px. A 2-D zoom and pan of the
+  // projection (camera.setViewOffset): the camera itself, the orbit and the
+  // zoom stay as they are, and picking, projectToClient, the markers and the
+  // pull overlay all go through the projection. null (or scale 1, no move):
+  // none. Drawn at the next tick (once while paused).
+  setFraming(framing) {
+    let f = null;
+    if (framing && Number.isFinite(framing.scale) && framing.scale > 0) {
+      f = { scale: Math.min(1, framing.scale), dx: Number(framing.dx) || 0, dy: Number(framing.dy) || 0 };
+      if (f.scale === 1 && Math.abs(f.dx) < 0.25 && Math.abs(f.dy) < 0.25) f = null;
+    }
+    const g = this._framing;
+    if (!f && !g) return;
+    if (f && g && Math.abs(f.scale - g.scale) < 1e-4 && Math.abs(f.dx - g.dx) < 0.25 && Math.abs(f.dy - g.dy) < 0.25) return;
+    this._framing = f;
+    const canvas = this.renderer.domElement;
+    this._applyFraming(canvas.clientWidth || this.host.clientWidth || 1, canvas.clientHeight || this.host.clientHeight || 1);
+    this._scaleMarkers();
+    this._redraw = true;
+  }
+
+  get framing() { return this._framing ? { ...this._framing } : null; }
+
+  // The framing on the projection of a w x h (CSS px) canvas: canvas point
+  // c = s v + (1 - s) centre + (dx, dy) for the unframed point v, i.e. a
+  // view offset of the w x h frame at -((1 - s) centre + d) / s, w / s x h / s.
+  _applyFraming(w, h) {
+    const f = this._framing, camera = this.camera;
+    if (!f) {
+      if (camera.view && camera.view.enabled) camera.clearViewOffset();
+      else camera.updateProjectionMatrix();
+      return;
+    }
+    const s = f.scale;
+    camera.setViewOffset(w, h, -((1 - s) * (w / 2) + f.dx) / s, -((1 - s) * (h / 2) + f.dy) / s, w / s, h / s);
   }
 
   // Pose the walker (the latest untimed frame, or the queue at the playback
@@ -676,7 +1322,9 @@ export class DemoRenderer {
       this._frame = null;
       this._applyPose(f, null, 0);
       this._shown.a = null; // nothing queued is on screen
-      this._release(f);
+      // Kept while the muscles skip it (X-ray), so turning X-ray off can pose them.
+      if (this._musclesStale) this._untimed = f;
+      else this._release(f);
     } else if (this._queue.length) {
       this._advance(dt);
     }
@@ -821,16 +1469,20 @@ export class DemoRenderer {
     this._draw();
   }
 
-  // Draw statistics from the last render (triangles, draw calls), and the
-  // frame queue: frames held, playback time and lag behind the newest frame
-  // (simulated s), arrival rate, and updates that ran out of frames.
+  // Draw statistics from the last render (triangles, draw calls), the muscle
+  // segments (and whether they are drawn), the X-ray and sensor-marker
+  // states, and the frame queue: frames held, playback time and lag behind
+  // the newest frame (simulated s), arrival rate, and updates that ran out of
+  // frames; the shader programs built so far.
   get stats() {
     const r = this.renderer.info.render;
     const q = this._queue, newest = q.length ? q[q.length - 1].time : null;
     return {
       triangles: r.triangles, calls: r.calls, segments: this.muscles.count,
+      muscles: this.muscles.visible, xray: this._xray, markers: this._markers.points.visible,
       queued: q.length, play: this._play, lag: newest === null || this._play === null ? null : newest - this._play,
       rate: this._rate, clamped: this._clamped,
+      programs: this.renderer.info.programs ? this.renderer.info.programs.length : null, // shader programs built so far
     };
   }
 
@@ -945,11 +1597,91 @@ export class DemoRenderer {
       }
       mesh.matrixWorldNeedsUpdate = true;
     }
+    if (this._untimed && this._untimed !== a) { // an untimed frame held for the muscles is off screen now
+      this._release(this._untimed);
+      this._untimed = null;
+    }
 
-    // Muscle instances: column-major matrices with a basis whose y axis runs
-    // along the segment (Duff et al. 2017 orthonormal basis), uniform scale = radius.
-    // Segments blend only between frames with the same segment rows; otherwise
-    // the newer frame's are drawn.
+    // Muscles: skipped (hidden) in X-ray, recomputed when it ends (_restoreMuscles).
+    if (this._xray) {
+      this._musclesStale = true;
+    } else {
+      this._updateMuscles(a, b, alpha);
+      this._musclesStale = false;
+      this.muscles.visible = true;
+    }
+
+    // The socket wrench, blended like the geoms (frames of an older worker
+    // have none; a view whose buffer went back reads as empty). The state a
+    // reset starts from (frame.initial, worker.js) is not a measurement: no
+    // wrench, no sensor frame, until the first control step's.
+    const measured = (f) => !!f && f.initial !== true;
+    const wa = measured(a) ? a.wrench : null, wb = measured(b) ? b.wrench : null;
+    const okA = !!wa && wa.length >= 6, okB = !!wb && wb.length >= 6;
+    if (okA) {
+      const w = this._wrench;
+      for (let k = 0; k < 6; k++) w[k] = okB ? wa[k] + alpha * (wb[k] - wa[k]) : wa[k];
+    }
+    this._wrenchOk = okA;
+
+    // The OSL sensor frame, blended the same way (it sizes the contact glyphs).
+    const sa = measured(a) ? a.sensors : null, sb = measured(b) ? b.sensors : null;
+    const ns = sa ? sa.length : 0;
+    if (ns > 0) {
+      if (!this._sensorValues || this._sensorValues.length !== ns) this._sensorValues = new Float64Array(ns);
+      const s = this._sensorValues, both = !!sb && sb.length === ns;
+      for (let k = 0; k < ns; k++) s[k] = both ? sa[k] + alpha * (sb[k] - sa[k]) : sa[k];
+    }
+    this._sensorsOk = ns > 0;
+
+    // The root (camera target and chase heading), blended like the geoms.
+    const ra = a.root, rb = b ? b.root : ra;
+    const off = this.cameraConfig.target_offset || [0, 0, 0];
+    this._root.set(
+      ra[0] + alpha * (rb[0] - ra[0]) + off[0],
+      ra[1] + alpha * (rb[1] - ra[1]) + off[1],
+      ra[2] + alpha * (rb[2] - ra[2]) + off[2]);
+    this._heading = ra[3] + alpha * wrapAngle(rb[3] - ra[3]);
+    this.robot.visible = true;
+    this._hasFrame = true;
+    if (this._xray) this._updateArrows();
+    if (this._sensorsOn) this._updateMarkers();
+    this._redraw = true;
+  }
+
+  // Place the sensor markers on the pose as drawn (each on its geom's mesh
+  // matrix) and size the contact glyphs by their force as drawn.
+  _updateMarkers() {
+    const m = this._markers;
+    const show = this._sensorsOn && this._hasFrame && m.list.length > 0;
+    m.points.visible = show;
+    if (!show) return;
+    const pos = m.position.array, size = m.size.array, fill = m.fill.array;
+    const contact = this.options.sensors.contact, s = this._sensorValues, ok = this._sensorsOk;
+    for (let i = 0; i < m.list.length; i++) {
+      const mk = m.list[i], l = mk.local, e = this.geomMeshes[mk.index].matrix.elements;
+      pos[3 * i] = e[12] + e[0] * l[0] + e[4] * l[1] + e[8] * l[2];
+      pos[3 * i + 1] = e[13] + e[1] * l[0] + e[5] * l[1] + e[9] * l[2];
+      pos[3 * i + 2] = e[14] + e[2] * l[0] + e[6] * l[1] + e[10] * l[2];
+      if (mk.channel >= 0) {
+        const v = ok && mk.channel < s.length ? s[mk.channel] : 0;
+        const force = Number.isFinite(v) ? Math.max(0, v) : 0; // a non-finite value draws as none
+        const k = Math.min(1, force / contact.full);
+        size[i] = mk.size + contact.grow * k;
+        fill[i] = force > contact.touch ? 0.35 + 0.65 * k : 0;
+      }
+    }
+    m.position.needsUpdate = true;
+    m.size.needsUpdate = true;
+    m.fill.needsUpdate = true;
+  }
+
+  // Muscle instances for the pose between frames a and b: column-major
+  // matrices with a basis whose y axis runs along the segment (Duff et al.
+  // 2017 orthonormal basis), uniform scale = radius. Segments blend only
+  // between frames with the same segment rows; otherwise the newer frame's are
+  // drawn.
+  _updateMuscles(a, b, alpha) {
     let sa = a.segments, sb = null, t = 0;
     let n = a.segmentCount | 0;
     if (b && (b.segmentCount | 0) === n) {
@@ -1004,18 +1736,97 @@ export class DemoRenderer {
     mus.instanceMatrix.clearUpdateRanges(); mus.instanceMatrix.addUpdateRange(0, 16 * n); mus.instanceMatrix.needsUpdate = true;
     mus.instanceColor.clearUpdateRanges(); mus.instanceColor.addUpdateRange(0, 3 * n); mus.instanceColor.needsUpdate = true;
     this._halfAttr.clearUpdateRanges(); this._halfAttr.addUpdateRange(0, n); this._halfAttr.needsUpdate = true;
+  }
 
-    // The root (camera target and chase heading), blended like the geoms.
-    const ra = a.root, rb = b ? b.root : ra;
-    const off = this.cameraConfig.target_offset || [0, 0, 0];
-    this._root.set(
-      ra[0] + alpha * (rb[0] - ra[0]) + off[0],
-      ra[1] + alpha * (rb[1] - ra[1]) + off[1],
-      ra[2] + alpha * (rb[2] - ra[2]) + off[2]);
-    this._heading = ra[3] + alpha * wrapAngle(rb[3] - ra[3]);
-    this.robot.visible = true;
-    this._hasFrame = true;
+  // Muscles back after the X-ray view: posed for the pose on screen from the
+  // frames it was blended from (still queued) or the untimed frame kept for
+  // this, then shown. If neither is held any more, a newer frame has arrived
+  // and the next update poses it: they stay hidden until then.
+  _restoreMuscles() {
+    if (this._musclesStale) {
+      const s = this._shown, q = this._queue;
+      let a = null, b = null, alpha = 0;
+      if (s.a && q.includes(s.a) && (!s.b || q.includes(s.b))) {
+        a = s.a; b = s.b; alpha = s.alpha;
+      } else if (this._untimed) {
+        a = this._untimed;
+      }
+      if (a && a.segments && a.segments.length > 0 && (!b || b.segments.length > 0)) {
+        this._updateMuscles(a, b, alpha);
+        this._musclesStale = false;
+      }
+      if (this._untimed) {
+        this._release(this._untimed);
+        this._untimed = null;
+      }
+    }
+    this.muscles.visible = !this._musclesStale;
+  }
+
+  // Every robot mesh's material and shadow flags for the current state: a
+  // ghost (bone, socket) in X-ray, else its base material; the glowing
+  // variant of either for the grabbed body. Base materials are never changed.
+  _refreshMaterials() {
+    const key = this._glow.key;
+    for (let i = 0; i < this.geomCount; i++) {
+      const mesh = this.geomMeshes[i], base = this._base[i], role = this.roles[i];
+      const lit = key !== null && this._glowKey(i) === key;
+      const look = role === 'bone' && this._residual[i] ? 'residual' : role;
+      const ghost = this._xray && (role === 'bone' || role === 'socket') ? this._ghosts[look] : null;
+      let material = base.material;
+      if (ghost) material = lit ? ghost.lit : ghost.plain;
+      else if (lit) material = this._litMaterial(base.spec);
+      mesh.material = material;
+      mesh.castShadow = ghost ? false : base.castShadow;
+      mesh.receiveShadow = ghost ? false : base.receiveShadow;
+      // Ghosts blend bones, then the socket, then the residual bones inside it.
+      mesh.renderOrder = ghost ? GHOST_ORDER[look] : 0;
+    }
     this._redraw = true;
+  }
+
+  _glowKey(i) { return this._geomBody[i] >= 0 ? `b${this._geomBody[i]}` : `g${i}`; }
+
+  // The grabbed variant of base material k (built once, by the factory).
+  _litMaterial(k) {
+    let lit = this._glow.lit.get(k);
+    if (!lit) {
+      lit = standardMaterial(this._specs[k], this.options.glow);
+      this._glow.lit.set(k, lit);
+    }
+    return lit;
+  }
+
+  // Place the X-ray overlay on the pose as drawn: both arrow tails and the dot
+  // at the socket anchor (its drawn geom's pose), along F and T as blended.
+  _updateArrows() {
+    const v = this._xrayView;
+    const show = this._xray && this._hasFrame && v.socket !== null;
+    v.group.visible = show;
+    if (!show) return;
+    const p = this._toWorld(v.socket.index, v.socket.local);
+    v.anchor.set(p[0], p[1], p[2]);
+    v.dot.position.copy(v.anchor);
+    v.dotHalo.position.copy(v.anchor);
+    const w = this._wrench, ok = this._wrenchOk;
+    this._placeArrow(v.force, ok ? w[0] : 0, ok ? w[1] : 0, ok ? w[2] : 0);
+    this._placeArrow(v.moment, ok ? w[3] : 0, ok ? w[4] : 0, ok ? w[5] : 0);
+  }
+
+  // One arrow from the anchor along (x, y, z): scale m per unit up to its
+  // cap; hidden below its min.
+  _placeArrow(arrow, x, y, z) {
+    const v = this._xrayView, cfg = arrow.cfg;
+    const magnitude = Math.hypot(x, y, z);
+    if (!Number.isFinite(magnitude) || magnitude < cfg.min) { // a non-finite wrench draws as none
+      arrow.group.visible = false;
+      arrow.length = 0;
+      return;
+    }
+    arrow.group.visible = true;
+    arrow.group.position.copy(v.anchor);
+    arrow.group.quaternion.setFromUnitVectors(UP_Y, v.dir.set(x / magnitude, y / magnitude, z / magnitude));
+    layoutArrow(arrow, Math.min(cfg.scale * magnitude, cfg.cap));
   }
 
   _updateCamera(dt) {
@@ -1122,7 +1933,8 @@ export class DemoRenderer {
     if (!n) return Infinity;
     const o = ray.origin, d = ray.direction, segs = this._segs;
     const f = this.camera.getWorldDirection(this._tmp);
-    const height = this.renderer.domElement.clientHeight || 1;
+    // A framed (shrunk) view draws a metre on fewer pixels: framing.scale.
+    const height = (this.renderer.domElement.clientHeight || 1) * (this._framing ? this._framing.scale : 1);
     const perMetre = (PICK_MUSCLE_PX * 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2)) / height;
     let best = Infinity;
     for (let i = 0, s = 0; i < n; i++, s += 7) {
@@ -1228,30 +2040,11 @@ export class DemoRenderer {
   }
 
   // Light the meshes of one body ('b<body id>') or geom ('g<index>'), or none:
-  // their materials are swapped for glowing copies, then back.
+  // the resolver gives them their glowing variant (a ghost's, in X-ray).
   _setGlow(key) {
-    const glow = this._glow;
-    if (glow.key === key) return;
-    for (const [mesh, material] of glow.meshes) mesh.material = material;
-    glow.meshes = [];
-    glow.key = key;
-    if (key !== null) {
-      for (let i = 0; i < this.geomCount; i++) {
-        const own = this._geomBody[i] >= 0 ? `b${this._geomBody[i]}` : `g${i}`;
-        if (own !== key) continue;
-        const mesh = this.geomMeshes[i];
-        let lit = glow.materials.get(mesh.material);
-        if (!lit) {
-          lit = mesh.material.clone();
-          lit.emissive.set(this.options.glow.color);
-          lit.emissiveIntensity = this.options.glow.intensity;
-          glow.materials.set(mesh.material, lit);
-        }
-        glow.meshes.push([mesh, mesh.material]);
-        mesh.material = lit;
-      }
-    }
-    this._redraw = true;
+    if (this._glow.key === key) return;
+    this._glow.key = key;
+    this._refreshMaterials();
   }
 
   dispose() {
@@ -1259,8 +2052,13 @@ export class DemoRenderer {
     this._releaseQueue(0);
     if (this._frame) this._release(this._frame);
     this._frame = null;
-    this._setGlow(null);
-    for (const lit of this._glow.materials.values()) lit.dispose();
+    if (this._untimed) this._release(this._untimed);
+    this._untimed = null;
+    this._xray = false;
+    this._glow.key = null;
+    this._refreshMaterials(); // base materials back on the meshes (the traversal below frees them)
+    for (const lit of this._glow.lit.values()) lit.dispose();
+    for (const g of Object.values(this._ghosts)) { g.plain.dispose(); g.lit.dispose(); }
     this._overlay.svg.remove();
     if (this.controls) this.controls.dispose();
     const seen = new Set();

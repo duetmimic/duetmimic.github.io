@@ -77,19 +77,72 @@
       <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.5v11M15 6.5v11"/></svg>
       <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8.5 5.8v12.4L18.5 12z"/></svg>
     </button>
-    <button id="btn-reset" class="tool tool-text" type="button" title="Reset (R)">
+    <button id="btn-reset" class="tool tool-text" type="button" title="Reset (R)" data-title="Reset" data-title-key="KeyR">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4.5v4.2h4.2"/></svg>
       Reset
     </button>
     <!-- app.js: data-mode = the renderer's camera mode ("follow" | "chase" | "free"). -->
-    <button id="btn-camera" class="tool" type="button" data-mode="follow" aria-label="Change camera" title="Change camera (C)">
+    <button id="btn-camera" class="tool" type="button" data-mode="follow" aria-label="Change camera" title="Change camera (C)" data-title="Change camera" data-title-key="KeyC">
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="12.5" height="10" rx="2.5"/><path d="m15.5 10.6 5-2.9v8.6l-5-2.9z"/></svg>
     </button>
     <!-- app.js: toggles #help (hidden) and aria-expanded. -->
-    <button id="btn-help" class="tool" type="button" aria-expanded="true" aria-controls="help" aria-label="How to play" title="How to play (H)">
+    <button id="btn-help" class="tool" type="button" aria-expanded="true" aria-controls="help" aria-label="How to play" title="How to play (H)" data-title="How to play" data-title-key="KeyH">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M9.7 9.6a2.4 2.4 0 0 1 4.7.6c0 1.6-2.4 2-2.4 3.6"/><path d="M12 16.9h.01"/></svg>
     </button>
   </div>
+
+  <!-- View toggles, top right (aria-pressed, app.js): the X-ray view (X) and
+       the sensor charts (G). Independent: both can be on. app.js rewrites the
+       titles of these and the top bar's buttons with the visitor's key
+       labels (data-title: the text before the key). -->
+  <div id="viewbar" class="panel" role="group" aria-label="View">
+    <button id="btn-xray" class="tool" type="button" aria-pressed="false" aria-label="X-ray view" title="X-ray view (X)" data-title="X-ray view" data-title-key="KeyX">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 8V5.5a2 2 0 0 1 2-2H8M16 3.5h2.5a2 2 0 0 1 2 2V8M20.5 16v2.5a2 2 0 0 1-2 2H16M8 20.5H5.5a2 2 0 0 1-2-2V16"/><path class="bone" d="M9.6 14.4l4.8-4.8"/><circle class="fill" cx="8.75" cy="13.65" r="1.65"/><circle class="fill" cx="10.35" cy="15.25" r="1.65"/><circle class="fill" cx="13.65" cy="8.75" r="1.65"/><circle class="fill" cx="15.25" cy="10.35" r="1.65"/></svg>
+    </button>
+    <button id="btn-sensors" class="tool" type="button" aria-pressed="false" aria-label="Sensor charts" aria-describedby="sensor-summary" title="Sensor charts (G)" data-title="Sensor charts" data-title-key="KeyG">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12.5h3.3l2.4-5.8 3.5 10.6 2.7-7 1.6 2.2h3.5"/></svg>
+    </button>
+  </div>
+
+  <!-- X-ray legend, shown with the X-ray view under #viewbar. app.js writes
+       the numbers (|F| in N, |T| in N m, of the wrench as drawn) at most ten
+       times a second; no live region, so a screen reader reads them when it
+       gets there, not at every change. The swatches take the arrows'
+       colours (app.js sets --xray-force and --xray-moment from the
+       renderer's). No pointer events. -->
+  <aside id="xray-legend" class="panel" aria-label="X-ray legend: socket load arrows" hidden>
+    <p class="xl-title">Socket load<span class="xl-more"> on the residual limb</span></p>
+    <dl class="xl-rows">
+      <div>
+        <dt><svg class="xl-swatch xl-force" viewBox="0 0 28 12" aria-hidden="true"><path d="M2.5 6h15"/><path class="fill" d="M26.5 6 17 1.2v9.6z"/></svg><span class="xl-label">Force</span></dt>
+        <dd><span id="xray-force" class="xl-num">–</span><span class="xl-unit">N</span></dd>
+      </div>
+      <div>
+        <dt><svg class="xl-swatch xl-moment" viewBox="0 0 28 12" aria-hidden="true"><path d="M2.5 6h11"/><path class="fill" d="M26.5 6 18.5 1.6v8.8zM20.5 6 12.5 1.6v8.8z"/></svg><span class="xl-label">Moment</span></dt>
+        <dd><span id="xray-moment" class="xl-num">–</span><span class="xl-unit">N·m</span></dd>
+      </div>
+    </dl>
+    <p class="xl-note">The force and moment the prosthesis applies to the residual limb at the socket.</p>
+  </aside>
+
+  <!-- Sensor charts (G, #btn-sensors): what the prosthesis itself measures,
+       over the last 3 s. js/ui/sensors.js draws them on two canvases it adds
+       to .sc-plots (aria-hidden; the panel has a fixed label) and shows
+       .sc-note when the frames carry no sensor data (or no chart matches
+       their channels). #sensor-summary (screen readers only, no live region)
+       holds the latest values as text: app.js refreshes it about once a
+       second and on a pause; #btn-sensors names it as its description.
+       app.js places the card under #viewbar (under #xray-legend when both
+       are on), sets data-mode full (six rows) or compact (gyro, force,
+       contact) by the room, and hides it where there is none. No pointer
+       events. -->
+  <aside id="sensor-card" class="panel" aria-label="OSL sensing: charts of the prosthesis's own sensors" data-mode="full" hidden>
+    <p class="sc-title">OSL sensing<span class="sc-span"> · last 3 s</span></p>
+    <p class="sc-sub">What the prosthesis measures · last 3 s</p>
+    <div class="sc-plots"><p class="sc-note" hidden>No sensor data from the simulation.</p></div>
+    <p class="sc-foot">Shank frame: x forward, y up, z right. The load cell reads 0 with the leg hanging.</p>
+    <p id="sensor-summary" class="sr-only"></p>
+  </aside>
 
   <dl class="stats panel" aria-label="Simulation status">
     <div><dt>Speed</dt><dd id="hud-speed">–</dd></div>
@@ -117,7 +170,10 @@
      car in reverse (S+A backs along a path that curves to the walker's left,
      demo.json "Backward, curving left"). The Drag rows: a press on the body
      grabs the part under it and pulls it toward the pointer (app.js,
-     "pulling"); a drag on the background orbits. -->
+     "pulling"); a drag on the background orbits. X (app.js, like R, C, H)
+     toggles the X-ray view and G the sensor charts; on touch screens their
+     buttons are the way in. Beside the X-ray legend and the sensor card the
+     panel shows compact or hidden when there is no room (app.js fitHelp). -->
 <aside id="help" class="panel" aria-labelledby="help-title" data-mode="full" hidden>
   <h2 id="help-title">How to play</h2>
   <dl class="key-grid">
@@ -129,6 +185,8 @@
     <div><dt><kbd data-key="Space">Space</kbd></dt><dd>Pause</dd></div>
     <div><dt><kbd data-key="KeyR" data-label="KeyR">R</kbd></dt><dd>Reset</dd></div>
     <div><dt><kbd data-key="KeyC" data-label="KeyC">C</kbd></dt><dd>Change camera</dd></div>
+    <div><dt><kbd data-key="KeyX" data-label="KeyX">X</kbd></dt><dd>X-ray view</dd></div>
+    <div><dt><kbd data-key="KeyG" data-label="KeyG">G</kbd></dt><dd>Sensor charts</dd></div>
     <div><dt><span class="pad-key drag-key">Drag</span></dt><dd>Pull a body part</dd></div>
   </dl>
   <dl class="touch-grid">
@@ -136,16 +194,21 @@
     <div><dt><span class="pad-key">&#x25C0;&#xFE0E;</span><span class="pad-key">&#x25B6;&#xFE0E;</span></dt><dd>Hold to turn</dd></div>
     <div><dt><span class="pad-key">Fast</span></dt><dd>Top speed</dd></div>
     <div><dt><span class="pad-key drag-key">Drag</span></dt><dd>Pull a body part</dd></div>
+    <!-- The view buttons' icons (#btn-xray, #btn-sensors, top right): the
+         touch way in. Left out on short windows, where the rows sit above
+         the pad. -->
+    <div class="xray-row"><dt><span class="pad-key icon-key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 8V5.5a2 2 0 0 1 2-2H8M16 3.5h2.5a2 2 0 0 1 2 2V8M20.5 16v2.5a2 2 0 0 1-2 2H16M8 20.5H5.5a2 2 0 0 1-2-2V16"/><path class="bone" d="M9.6 14.4l4.8-4.8"/><circle class="fill" cx="8.75" cy="13.65" r="1.65"/><circle class="fill" cx="10.35" cy="15.25" r="1.65"/><circle class="fill" cx="13.65" cy="8.75" r="1.65"/><circle class="fill" cx="15.25" cy="10.35" r="1.65"/></svg></span></dt><dd>X-ray view</dd></div>
+    <div class="sensors-row"><dt><span class="pad-key icon-key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12.5h3.3l2.4-5.8 3.5 10.6 2.7-7 1.6 2.2h3.5"/></svg></span></dt><dd>Sensor charts</dd></div>
   </dl>
   <p class="help-notes">
     <span>Pulled off balance, it has to catch itself.</span>
     <span class="for-keys">Arrow keys steer too; <span data-label="KeyH">H</span> toggles this panel.</span>
     <span class="for-keys">Drag the background to orbit, <span class="zoom-page">scroll to zoom.</span><span class="zoom-embed"><span data-zoom-key>Ctrl</span> + scroll to zoom.</span></span>
     <span class="for-touch">Drag the background to orbit, pinch to zoom.</span>
-    <span>Muscle colour: pale = relaxed, deep red = active.</span>
+    <span class="muscle-note">Muscle colour: pale = relaxed, deep red = active.</span>
   </p>
   <!-- One-line legend: the embedded help, and very short windows. -->
-  <p class="help-compact"><b data-label="KeyW">W</b>/<b data-label="KeyS">S</b> walk · <b data-label="KeyA">A</b>/<b data-label="KeyD">D</b> turn · <b>1</b>–<b>5</b> speed · <b>Space</b> pause · <b data-label="KeyR">R</b> reset · <b data-label="KeyC">C</b> camera · <b>Drag</b> body to pull · <b data-label="KeyH">H</b> help</p>
+  <p class="help-compact"><b data-label="KeyW">W</b>/<b data-label="KeyS">S</b> walk · <b data-label="KeyA">A</b>/<b data-label="KeyD">D</b> turn · <b>1</b>–<b>5</b> speed · <b>Space</b> pause · <b data-label="KeyR">R</b> reset · <b data-label="KeyC">C</b> camera · <b data-label="KeyX">X</b> X-ray · <b data-label="KeyG">G</b> sensors · <b>Drag</b> body to pull · <b data-label="KeyH">H</b> help</p>
 </aside>
 
 <!-- Touch steering, shown on touch screens (html.touch). Each arrow holds the
@@ -181,7 +244,7 @@
     <h1 id="loader-title">DuetMimic</h1>
     <p id="loader-status" aria-live="polite">Loading…</p>
     <div class="loader-track" aria-hidden="true"><div id="loader-bar"></div></div>
-    <!-- app.js replaces this with the size from demo.json (31.2 MB on 2026-11-16)
+    <!-- app.js replaces this with the size from demo.json (31.1 MB with bundle B, 2026-11-18)
          and hides it once the status line counts the download. -->
     <p id="loader-size">About 31 MB download</p>
     <button id="start-btn" type="button" disabled>

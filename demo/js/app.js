@@ -32,16 +32,41 @@
 // (render/scene.js), and only when something changed, so a paused or
 // off-screen demo costs no GPU work.
 //
-// Query: ?backend=cpu|webgpu (default auto), ?debug=1 (extra HUD rows).
-// Test hook: window.__duet.state(), .stats(), .events(), and for pulling
-// .pick(clientX, clientY), .project([x, y, z]), .geomPoint(geom, local?).
+// X-ray view (X, or #btn-xray in #viewbar): the muscles hidden, the bones and
+// the socket see-through, the rest of the prosthesis as it is, and arrows for
+// the force and moment the prosthesis applies to the residual limb at the
+// socket (view.setXray). #xray-legend names them and gives their size, from
+// the wrench as drawn, at most every LEGEND_MS. Running or paused; it stays
+// on through resets, camera changes and pauses, not across reloads.
+//
+// Sensor charts (G, or #btn-sensors): #sensor-card, strip charts of what the
+// prosthesis itself measures over the last 3 s (ui/sensors.js: IMU, ankle
+// load cell, foot contact, encoders), and a marker on the leg at each sensor
+// in the same colours (view.setSensorMarkers). Every frame's sensors go into
+// the card's history on arrival; the card draws in the render loop at the
+// play time of the pose on screen. It sits in the right column under the
+// view toggles (under the X-ray legend when both are on), full or compact as
+// there is room (on a phone compact across the top), or not at all (a toast
+// says so). Where it or the legend would cover the walker, the view frames
+// the walker beside or below them (frameWalker, view.setFraming).
+// Independent of the X-ray view; the same rules otherwise.
+//
+// Query: ?backend=cpu|webgpu (default auto), ?debug=1 (extra HUD rows),
+// ?xray=1 (start in the X-ray view), ?sensors=1 (start with the sensor charts).
+// Test hook: window.__duet.state(), .stats(), .events(), for pulling
+// .pick(clientX, clientY), .project([x, y, z]), .geomPoint(geom, local?), for
+// the X-ray view .xray() (the arrows as drawn), for the sensor charts
+// .sensors() (the card and the markers as drawn), and .help(mode?) (ask for a
+// help mode, then lay the panels out as a resize does; returns the mode shown).
 
 import { loadContainer, loadJSON } from './lib/container.js';
+import { SensorCard } from './ui/sensors.js';
 
-const ASSETS = new URL('../assets/r2/', import.meta.url);
+const ASSETS = new URL('../assets/stage2/', import.meta.url);
 // Bytes not listed in demo.json, for the download note: vendor/mujoco/mujoco.wasm.gz
 // plus three.js, mujoco.js and the demo's own scripts, styles and demo.json as
-// GitHub Pages sends them (gzip). Measured 2026-11-16 (31.2 MB in all).
+// GitHub Pages sends them (gzip). Measured 2026-11-16 (31.2 MB in all with the
+// R2 bundle's assets; 31.1 MB with bundle B's, 2026-11-18).
 const UNLISTED_BYTES = 2475508 + 577000;
 // Camera modes in the order C cycles them, and their names in the toast.
 const CAMERA_MODES = ['chase', 'follow', 'free'];
@@ -52,6 +77,15 @@ const CAMERA_NAMES = {
 };
 const CAMERA_NAMES_TOUCH = { ...CAMERA_NAMES, free: 'free (drag the background to orbit, two fingers to pan)' };
 const TOAST_MS = 1500;
+const LEGEND_MS = 100; // the X-ray legend's numbers change at most this often
+const SUMMARY_MS = 1000; // the sensor card's text for screen readers, at most this often (and on a pause)
+const PANEL_GAP = 6; // px: the help yields to the X-ray legend and the sensor card closer than this
+const COLUMN_GAP = 8; // px between the panels of the right column (view toggles, legend, card)
+const TOAST_BESIDE_MIN = 240; // px: a toast narrower than this beside the right column goes under it
+const NO_ROOM_CARD = 'No room for the sensor charts here';
+const NO_ROOM_HELP = 'No room for the help here';
+const NO_ROOM_FULL_HELP = 'No room for the full help here';
+const TOAST_TALL = 52; // px: a two-line toast, for keeping it clear of the touch pad
 const ZOOM_HINT_MS = 4000; // embedded: "Ctrl + scroll to zoom" at most this often
 const CONTEXT_RESTORE_MS = 5000; // a lost WebGL context not back by then ends the demo
 const ZOOM_KEY = /mac|iphone|ipad/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '') ? '⌘' : 'Ctrl';
@@ -75,11 +109,22 @@ const el = {
   note: $('hud-note'),
   noteText: document.querySelector('#hud-note dd'),
   help: $('help'),
+  topbar: document.querySelector('#hud .topbar'),
+  stats: document.querySelector('#hud .stats'),
+  back: $('back-link'),
+  viewbar: $('viewbar'),
   toast: $('toast'),
   reset: $('btn-reset'),
   pause: $('btn-pause'),
   camera: $('btn-camera'),
   helpBtn: $('btn-help'),
+  xrayBtn: $('btn-xray'),
+  xrayLegend: $('xray-legend'),
+  xrayForce: $('xray-force'),
+  xrayMoment: $('xray-moment'),
+  sensorsBtn: $('btn-sensors'),
+  sensorCard: $('sensor-card'),
+  sensorSummary: $('sensor-summary'),
   pad: $('touch-pad'),
   fast: $('pad-fast'),
   error: $('error'),
@@ -88,7 +133,8 @@ const el = {
 
 const params = new URLSearchParams(location.search);
 const embedded = el.root.classList.contains('embed');
-const debug = params.has('debug') && !['0', 'false'].includes(params.get('debug'));
+const flag = (name) => params.has(name) && !['0', 'false'].includes(params.get(name));
+const debug = flag('debug');
 const requestedBackend = ['cpu', 'webgpu', 'auto'].includes(params.get('backend')) ? params.get('backend') : 'auto';
 const reducedMotion = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
 
@@ -108,7 +154,15 @@ const app = {
   fps: 0, // drawings per second
   cpuNoteShown: false,
   hasMoved: false, // until the first move the command pill says how to walk
-  help: 'hidden', // full | compact | hidden
+  help: 'hidden', // full | compact | hidden: the mode asked for
+  helpShown: 'hidden', // the mode shown (fitHelp: the X-ray legend may leave less room)
+  xray: false, // the X-ray view
+  sensors: false, // the sensor charts and markers
+  card: null, // the SensorCard (once demo.json is in)
+  cardMode: 'off', // off | full | compact | none (wanted, but no room: hidden)
+  framing: null, // {scale, dx, dy, zone}: the walker moved clear of the right column (frameWalker), or null
+  walker: null, // the walker's zone on screen (client px), framed or not
+  walkerCovered: false, // a view panel covers the walker and there is no room to frame it clear
   touch: el.root.classList.contains('touch'),
   fast: false, // the touch pad's Fast toggle
   offscreen: false,
@@ -221,13 +275,13 @@ function hideToast() {
 // the Keyboard Map API where it exists, else learned from the first letter key
 // whose e.key disagrees with its code (AZERTY: the W position types 'z').
 // Elements with data-label="<code>" show the label of that code.
-const LABELLED = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyR', 'KeyC', 'KeyH'];
+const LABELLED = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyR', 'KeyC', 'KeyH', 'KeyX', 'KeyG'];
 // Common layouts that differ from QWERTY at those positions: one key from the
 // fallback identifies the layout and so labels the others too.
 const LAYOUTS = [
-  { KeyW: 'z', KeyA: 'q', KeyS: 's', KeyD: 'd', KeyQ: 'a', KeyE: 'e', KeyR: 'r', KeyC: 'c', KeyH: 'h' }, // AZERTY
-  { KeyW: ',', KeyA: 'a', KeyS: 'o', KeyD: 'e', KeyQ: "'", KeyE: '.', KeyR: 'p', KeyC: 'j', KeyH: 'd' }, // Dvorak
-  { KeyW: 'w', KeyA: 'a', KeyS: 'r', KeyD: 's', KeyQ: 'q', KeyE: 'f', KeyR: 'p', KeyC: 'c', KeyH: 'h' }, // Colemak
+  { KeyW: 'z', KeyA: 'q', KeyS: 's', KeyD: 'd', KeyQ: 'a', KeyE: 'e', KeyR: 'r', KeyC: 'c', KeyH: 'h', KeyX: 'x', KeyG: 'g' }, // AZERTY
+  { KeyW: ',', KeyA: 'a', KeyS: 'o', KeyD: 'e', KeyQ: "'", KeyE: '.', KeyR: 'p', KeyC: 'j', KeyH: 'd', KeyX: 'q', KeyG: 'i' }, // Dvorak
+  { KeyW: 'w', KeyA: 'a', KeyS: 'r', KeyD: 's', KeyQ: 'q', KeyE: 'f', KeyR: 'p', KeyC: 'c', KeyH: 'h', KeyX: 'x', KeyG: 'd' }, // Colemak
 ];
 const keyLabels = new Map(); // code -> label where it differs from the QWERTY letter
 let layoutNoticed = false;
@@ -273,11 +327,14 @@ function setTouch() {
   el.root.classList.add('touch');
   if (app.help === 'compact') setHelp('hidden'); // the pad replaces the keyboard legend
   refreshTexts();
+  layoutHud();
 }
 
-// Texts that name keys or depend on touch mode.
+// Texts that name keys or depend on touch mode: [data-label] elements and the
+// buttons' titles ([data-title] + the label of [data-title-key]).
 function refreshTexts() {
   for (const node of document.querySelectorAll('[data-label]')) node.textContent = keyLabel(node.dataset.label);
+  for (const node of document.querySelectorAll('[data-title][data-title-key]')) node.title = `${node.dataset.title} (${keyLabel(node.dataset.titleKey)})`;
   if (app.phase === 'ready') el.loaderStatus.textContent = readyText();
   if (app.status) showCommand(app.status);
   if (pauseReasons.has('user') && el.toast.classList.contains('show')) el.toast.textContent = pauseNotice();
@@ -474,6 +531,8 @@ function onKeyDown(e) {
     case 'KeyR': resetSim(); break;
     case 'KeyC': cycleCamera(); break;
     case 'KeyH': toggleHelp(); break;
+    case 'KeyX': toggleXray(); break;
+    case 'KeyG': toggleSensors(); break;
     default: break;
   }
 }
@@ -543,16 +602,340 @@ function cycleCamera() {
 
 // Help: 'full' (the panel), 'compact' (the one-line legend, embedded) or
 // 'hidden'. It starts full on /demo/, compact when embedded and hidden on
-// touch screens; H, ? and the ? button switch between full and that start.
+// touch screens. That is the mode asked for (app.help). A help panel that
+// would overlap the X-ray legend, the sensor card, the view toggles or the
+// top bar (short windows, the project page's iframe on a phone), or, on a
+// keyboard, cover the walker where the view panels have moved it (narrow
+// windows), shows less until there is room again (fitHelp; app.helpShown):
+// with a keyboard the one-line legend, at the bottom right or left of the
+// right column, wrapping there; on touch screens nothing. H, ? and the ?
+// button toggle what is on screen: the full panel goes back to the start
+// mode, anything less asks for the full panel. Where that changes nothing
+// on screen, the one-line legend goes instead (no room for the panel), or a
+// toast says there is no room for any help.
 function setHelp(mode) {
   app.help = mode;
-  el.help.hidden = mode === 'hidden';
-  el.help.dataset.mode = mode === 'compact' ? 'compact' : 'full';
-  el.helpBtn.setAttribute('aria-expanded', String(mode === 'full'));
+  fitHelp();
 }
 
 function toggleHelp() {
-  setHelp(app.help === 'full' ? (embedded && !app.touch ? 'compact' : 'hidden') : 'full');
+  const shown = app.helpShown;
+  setHelp(shown === 'full' ? (embedded && !touchMode() ? 'compact' : 'hidden') : 'full');
+  if (app.helpShown !== shown) return;
+  if (shown !== 'hidden') { // the legend on screen is all that fits: H takes it away
+    setHelp('hidden');
+    toast(NO_ROOM_FULL_HELP);
+  } else {
+    toast(NO_ROOM_HELP);
+  }
+}
+
+// The help as shown: 'full', 'compact' (the one-line legend), 'beside' (that
+// legend left of the right column: class "beside", it wraps there) or
+// 'hidden'. app.helpShown is 'compact' for both legend placements.
+function showHelp(mode) {
+  const compact = mode === 'compact' || mode === 'beside';
+  app.helpShown = compact ? 'compact' : mode;
+  el.help.hidden = mode === 'hidden';
+  el.help.dataset.mode = compact ? 'compact' : 'full';
+  el.help.classList.toggle('beside', mode === 'beside');
+  el.helpBtn.setAttribute('aria-expanded', String(mode === 'full'));
+}
+
+const isShown = (node) => !!node && !node.hidden && getComputedStyle(node).display !== 'none';
+const rectOf = (node) => (isShown(node) ? node.getBoundingClientRect() : null);
+const crosses = (a, b, gap = 0) => a.left < b.right + gap && b.left < a.right + gap && a.top < b.bottom + gap && b.top < a.bottom + gap;
+const touchMode = () => app.touch || el.root.classList.contains('touch');
+// The page's edge margin (--edge, px): read once per layout pass.
+const edgeOf = () => parseFloat(getComputedStyle(el.root).getPropertyValue('--edge')) || 16;
+
+// The help mode shown for the one asked for (see setHelp): the first of the
+// tries that crosses none of the panels around it (the X-ray legend, the
+// sensor card, the view toggles, the top bar and, with a keyboard, the
+// stats; demo.css keeps it clear of those by its width where both sit at
+// the bottom) and, a
+// keyboard's full panel, not the walker where the panels have framed it
+// elsewhere (a narrow window with the card across its top would otherwise
+// hide all but its head).
+function fitHelp() {
+  const touch = touchMode();
+  const legend = touch ? [] : ['compact', 'beside']; // the one-line legend: keyboards only
+  const tries = app.help === 'hidden' ? ['hidden']
+    : app.help === 'full' ? ['full', ...legend, 'hidden']
+      : app.help === 'compact' ? [...(touch ? ['compact'] : legend), 'hidden'] : [app.help, 'hidden'];
+  const clear = [el.xrayLegend, el.sensorCard, el.viewbar, el.topbar, touch ? null : el.stats].map((node) => [rectOf(node), node]).filter(([r]) => r);
+  const gap = (node) => (node === el.xrayLegend || node === el.sensorCard ? PANEL_GAP : 0);
+  const column = clear.some(([, node]) => node === el.xrayLegend || node === el.sensorCard); // 'beside' needs one
+  const plan = !touch && app.help === 'full' ? planFraming() : null;
+  const walker = plan && plan.framing ? plan.framing.zone : null;
+  for (const mode of tries) {
+    if (mode === 'beside' && !column) continue;
+    showHelp(mode);
+    if (mode === 'hidden') return;
+    const r = el.help.getBoundingClientRect();
+    if (clear.some(([q, node]) => crosses(r, q, gap(node)))) continue;
+    if (mode === 'full' && walker && crosses(r, walker)) continue;
+    return;
+  }
+}
+
+// The sensor card (html.sensors: the charts are on), in the right column:
+// under the view toggles, and under the top bar where that spans the card's
+// column and the X-ray legend when it is at the top. Its variants, in this
+// order: full; compact across the width (portrait windows: the walker is
+// framed below it, see frameWalker); compact. Each must fit above the bottom
+// of the window, clear of the panels below it (the touch pad, the stats, the
+// legend beside the pad, the back link), and leave the walker room
+// (planFraming); the first that keeps the walker within FRAME_PREFER of the
+// largest scale any of them allows wins (on a phone the card across the width,
+// with plots twice as wide and the walker centred under it, rather than at
+// the right with the walker squeezed into the strip beside it). Touch phones (the shorter side under 600 px) and
+// narrow portrait windows get no full card. Hidden where none fits, with a
+// toast when it was on screen until now (app.cardMode 'none'), and back when
+// there is room again.
+const FRAME_PREFER = 0.12; // of the walker's scale: an earlier variant may cost this much
+
+function placeCard(edge = edgeOf()) {
+  const card = el.sensorCard;
+  if (!card) return;
+  const before = app.cardMode;
+  if (!el.root.classList.contains('sensors')) {
+    card.hidden = true;
+    app.cardMode = 'off';
+    if (app.card) app.card.setVisible(false);
+    updateSummary(0, true);
+    return;
+  }
+  card.hidden = false;
+  const wasWide = card.classList.contains('wide');
+  const W = innerWidth, H = innerHeight;
+  const legend = rectOf(el.xrayLegend);
+  const legendTop = !!legend && legend.top < H / 2;
+  const above = [el.viewbar, el.topbar].map(rectOf).filter(Boolean);
+  if (legendTop) above.push(legend);
+  const obstacles = [el.back, el.stats, el.pad, el.topbar, el.viewbar].map(rectOf).filter(Boolean);
+  if (legend) obstacles.push(legend);
+  const phone = (touchMode() && Math.min(W, H) < 600) || (W < 480 && H >= W);
+  const variants = [phone ? null : ['full', false], H > W ? ['compact', true] : null, ['compact', false]].filter(Boolean);
+  const put = ([mode, wide]) => {
+    card.dataset.mode = mode;
+    card.classList.toggle('wide', wide);
+    card.style.top = '0px';
+    const box = card.getBoundingClientRect();
+    let top = 0;
+    for (const r of above) {
+      if (r.left < box.right && box.left < r.right) top = Math.max(top, r.bottom + COLUMN_GAP);
+    }
+    card.style.top = `${Math.ceil(top)}px`;
+    const placed = card.getBoundingClientRect();
+    return placed.left >= edge - 0.5 && placed.bottom <= H - edge + 0.5 && !obstacles.some((r) => crosses(placed, r, COLUMN_GAP - 2));
+  };
+  const fits = [];
+  for (const v of variants) {
+    if (!put(v)) continue;
+    const plan = planFraming(edge);
+    const scale = plan.covered ? 0 : plan.framing ? plan.framing.scale : 1;
+    if (scale > 0) fits.push({ v, scale });
+  }
+  const largest = Math.max(0, ...fits.map((f) => f.scale));
+  const best = fits.find((f) => f.scale >= largest - FRAME_PREFER) || null;
+  const mode = best ? best.v[0] : 'none';
+  if (best) put(best.v);
+  app.cardMode = mode;
+  card.hidden = mode === 'none';
+  if (app.card) {
+    if (mode !== 'none') app.card.setMode(mode);
+    if (card.classList.contains('wide') !== wasWide) app.card.invalidate(); // another width, the same mode
+    app.card.setVisible(app.sensors && mode !== 'none');
+  }
+  updateSummary(0, true);
+  if (mode === 'none' && (before === 'full' || before === 'compact') && app.sensors && app.phase === 'running') toast(NO_ROOM_CARD);
+}
+
+// The toast keeps clear of the right column's panels at the top (the X-ray
+// legend there, the sensor card): centred and narrower beside them
+// (html.toast-beside) on windows wider than 800px, else left-aligned beside
+// them (html.toast-left), each where that leaves it TOAST_BESIDE_MIN or more;
+// otherwise under them (html.toast-below), and there right of the touch pad
+// where the pad comes up to it (html.toast-pad, --toast-left: a phone-sized
+// embed). --column-right is the column's distance from the window's right
+// edge, --column-bottom its bottom (px).
+function layoutToast(edge = edgeOf()) {
+  const legend = rectOf(el.xrayLegend);
+  const column = [legend && legend.top < innerHeight / 2 ? legend : null, rectOf(el.sensorCard)].filter(Boolean);
+  el.root.classList.remove('toast-beside', 'toast-left', 'toast-below', 'toast-pad');
+  if (!column.length) return;
+  const right = Math.ceil(Math.max(...column.map((r) => innerWidth - r.left)));
+  const bottom = Math.ceil(Math.max(...column.map((r) => r.bottom)));
+  const centred = innerWidth - 2 * (right + COLUMN_GAP), left = innerWidth - right - COLUMN_GAP - edge;
+  const mode = innerWidth > 800 && centred >= TOAST_BESIDE_MIN ? 'beside' : left >= TOAST_BESIDE_MIN ? 'left' : 'below';
+  el.root.classList.add(`toast-${mode}`);
+  el.root.style.setProperty('--column-right', `${right}px`);
+  el.root.style.setProperty('--column-bottom', `${bottom}px`);
+  const pad = mode === 'below' ? rectOf(el.pad) : null;
+  const top = bottom + COLUMN_GAP;
+  if (pad && pad.top < top + TOAST_TALL + COLUMN_GAP && pad.bottom > top) {
+    el.root.classList.add('toast-pad');
+    el.root.style.setProperty('--toast-left', `${Math.ceil(pad.right + COLUMN_GAP)}px`);
+  }
+}
+
+// Framing the walker. With the default camera (render/scene.js: the chase
+// camera at its default distance, and the hero view) the walker fills about
+// WALKER_BAND of the window's height, centred, WALKER_HALF_WIDTH x the height
+// to either side (measured walking, arms swinging; 2026-11-19). Where the
+// view panels cross that zone (the sensor card or the X-ray legend in the
+// right column at the top: portrait phones and tablets, narrow windows; the
+// legend beside the touch pad on short phones), the view is moved and, if it
+// must, shrunk (view.setFraming) into the free area that keeps it largest:
+// left of the column or below it, or above the legend at the bottom; always
+// under the top bar and above the touch pad. Elsewhere nothing changes.
+const WALKER_BAND = [0.17, 0.88];
+const WALKER_HALF_WIDTH = 0.16;
+const FRAME_MIN_SCALE = 0.4; // smaller than this, the walker is left where it is
+
+// The walker's zone on screen (client px) at scale s about (cx, cy).
+function walkerZone(W, H, s = 1, cx = W / 2, cy = (H * (WALKER_BAND[0] + WALKER_BAND[1])) / 2) {
+  const hw = WALKER_HALF_WIDTH * H * s, hh = ((WALKER_BAND[1] - WALKER_BAND[0]) * H * s) / 2;
+  return { left: cx - hw, top: cy - hh, right: cx + hw, bottom: cy + hh };
+}
+
+// Where the walker goes with the panels as they are now (client px): {framing
+// ({scale, dx, dy, zone} | null), covered (a panel over it and no room to
+// frame it clear), natural (its zone unframed)}.
+function planFraming(edge = edgeOf()) {
+  const W = innerWidth, H = innerHeight;
+  const natural = walkerZone(W, H);
+  const legend = rectOf(el.xrayLegend);
+  const legendTop = !!legend && legend.top < H / 2;
+  const column = [rectOf(el.sensorCard), legendTop ? legend : null].filter(Boolean); // the right column, at the top
+  const below = legend && !legendTop ? legend : null; // the legend beside the touch pad
+  const over = column.some((r) => crosses(r, natural)) || (!!below && crosses(below, natural));
+  let framing = null;
+  if (over) {
+    // An area starts under the top bar, the back link and the view toggles
+    // above it, and ends over the touch pad and the legend at the bottom.
+    const tops = [el.topbar, el.back, el.viewbar].map(rectOf).filter(Boolean);
+    const ceiling = (left, right) => Math.max(0, ...tops.filter((r) => r.left < right && left < r.right).map((r) => r.bottom + COLUMN_GAP));
+    let floor = H - edge;
+    const pad = rectOf(el.pad);
+    if (pad) floor = Math.min(floor, pad.top - COLUMN_GAP);
+    if (below) floor = Math.min(floor, below.top - COLUMN_GAP);
+    const columnLeft = column.length ? Math.min(...column.map((r) => r.left)) - COLUMN_GAP : W - edge;
+    const areas = column.length ? [
+      { left: edge, top: ceiling(edge, columnLeft), right: columnLeft, bottom: floor }, // left of the column
+      { left: edge, top: Math.max(ceiling(edge, W - edge), ...column.map((r) => r.bottom + COLUMN_GAP)), right: W - edge, bottom: floor }, // below it
+    ] : [{ left: edge, top: ceiling(edge, W - edge), right: W - edge, bottom: floor }]; // above the legend at the bottom
+    const cx = (natural.left + natural.right) / 2, cy = (natural.top + natural.bottom) / 2;
+    const hw = (natural.right - natural.left) / 2, hh = (natural.bottom - natural.top) / 2;
+    const clamp = (v, lo, hi) => (lo > hi ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, v)));
+    let move = Infinity;
+    for (const a of areas) {
+      const s = Math.min(1, (a.right - a.left) / (2 * hw), (a.bottom - a.top) / (2 * hh));
+      if (!(s >= FRAME_MIN_SCALE)) continue;
+      const x = clamp(cx, a.left + s * hw, a.right - s * hw), y = clamp(cy, a.top + s * hh, a.bottom - s * hh);
+      const d = Math.hypot(x - cx, y - cy);
+      if (!framing || s > framing.scale + 1e-6 || (Math.abs(s - framing.scale) <= 1e-6 && d < move)) {
+        // The zone's centre (cx, cy) goes to (x, y): c = s v + (1 - s) centre + d.
+        framing = { scale: s, dx: x - s * cx - (1 - s) * (W / 2), dy: y - s * cy - (1 - s) * (H / 2), zone: walkerZone(W, H, s, x, y) };
+        move = d;
+      }
+    }
+  }
+  return { framing, covered: over && !framing, natural };
+}
+
+function frameWalker(edge = edgeOf()) {
+  const plan = planFraming(edge);
+  app.framing = plan.framing;
+  app.walker = plan.framing ? plan.framing.zone : plan.natural;
+  app.walkerCovered = plan.covered; // the smallest embeds, under the X-ray legend
+  if (app.view) app.view.setFraming(app.framing);
+}
+
+// The panels around the right column: the sensor card is placed under the
+// view toggles and the X-ray legend, the toast keeps clear of both and the
+// help fits beside them; the walker is framed clear of them. Run on every
+// change of the legend, the card, the help, the touch mode and the window
+// size.
+function layoutHud() {
+  const edge = edgeOf();
+  placeCard(edge);
+  layoutToast(edge);
+  fitHelp();
+  frameWalker(edge);
+}
+
+// ------------------------------------------------------------------ X-ray view
+// On or off: the renderer (when there is one), the button, the legend and the
+// panels around it; a toast unless quiet (?xray=1 at load).
+function setXray(on, quiet = false) {
+  app.xray = !!on;
+  el.root.classList.toggle('xray', app.xray);
+  if (el.xrayBtn) el.xrayBtn.setAttribute('aria-pressed', String(app.xray));
+  if (el.xrayLegend) el.xrayLegend.hidden = !app.xray;
+  if (app.view) app.view.setXray(app.xray);
+  updateLegend(0, true);
+  layoutHud();
+  if (!quiet) toast(app.xray ? 'X-ray view on' : 'X-ray view off');
+}
+
+function toggleXray() {
+  if (app.phase !== 'running' || !app.view) return;
+  setXray(!app.xray);
+}
+
+// The legend's numbers: |F| (N) and |T| (N m) of the wrench as drawn, at most
+// every LEGEND_MS (now: a requestAnimationFrame time), or at once with force.
+let legendAt = -Infinity;
+
+function updateLegend(now, force = false) {
+  if (!app.xray || !el.xrayForce) return;
+  if (!force && now - legendAt < LEGEND_MS) return;
+  legendAt = force ? -Infinity : now;
+  const w = app.view ? app.view.wrench : null;
+  // No wrench (an older worker, the reset state before its first step) or a
+  // non-finite one: a dash.
+  const size = (a, b, c) => { const n = Math.hypot(a, b, c); return Number.isFinite(n) ? String(Math.round(n)) : '–'; };
+  setText(el.xrayForce, w ? size(w[0], w[1], w[2]) : '–');
+  setText(el.xrayMoment, w ? size(w[3], w[4], w[5]) : '–');
+}
+
+// ------------------------------------------------------------------ sensor charts
+// On or off: the markers (when there is a renderer), the button, the card and
+// the panels around it; a toast unless quiet (?sensors=1 at load), which says
+// so where the card has no room.
+function setSensors(on, quiet = false) {
+  app.sensors = !!on;
+  el.root.classList.toggle('sensors', app.sensors);
+  if (el.sensorsBtn) el.sensorsBtn.setAttribute('aria-pressed', String(app.sensors));
+  if (app.view) app.view.setSensorMarkers(app.sensors);
+  layoutHud(); // places the card and shows it (app.card.setVisible) where it fits
+  if (!quiet) toast(!app.sensors ? 'Sensor charts off' : app.cardMode === 'none' ? NO_ROOM_CARD : 'Sensor charts on');
+}
+
+function toggleSensors() {
+  if (app.phase !== 'running' || !app.view) return;
+  setSensors(!app.sensors);
+}
+
+// #sensor-summary: the card's latest values as text for screen readers (the
+// charts are canvases), at most every SUMMARY_MS, at once with force (the
+// card shown or hidden, a drawing of a paused pose); empty while the card is
+// not on screen. Not a live region: read when the visitor gets there (or
+// focuses #btn-sensors, which it describes).
+let summaryAt = -Infinity;
+
+function updateSummary(now, force = false) {
+  if (!el.sensorSummary) return;
+  if (!app.card || !app.card.visible) {
+    summaryAt = -Infinity;
+    setText(el.sensorSummary, '');
+    return;
+  }
+  if (!force && now - summaryAt < SUMMARY_MS) return;
+  summaryAt = force ? -Infinity : now;
+  setText(el.sensorSummary, app.card.summary());
 }
 
 // A mouse click leaves the button focused; Space would then press it again
@@ -737,6 +1120,10 @@ function giveBack(frame) {
 function onFrame(frame) {
   app.frames.received += 1;
   app.root = Array.from(frame.root);
+  // The sensor history copies the frame's sensors now: setFrame may hand the
+  // frame's buffer back to the worker at once. Kept whether the card is
+  // shown or not, so it opens with the last seconds.
+  if (app.card) app.card.push(frame);
   if (!app.view) {
     giveBack(heldFrame);
     heldFrame = frame;
@@ -892,7 +1279,9 @@ function startWorker() {
 // renderer draws only if the picture changed; nothing at all while the frame
 // is off screen or without a context. While paused the clock stands still
 // (dt 0), so the camera stops easing with the walker and drawing stops at
-// once; orbiting and zooming still draw.
+// once; orbiting and zooming still draw. The sensor card draws after the
+// view, at the play time of the pose just drawn (when shown, at most 30
+// times a second, only once that time has moved and new data has come).
 let fpsFrames = 0;
 let fpsSince = 0;
 
@@ -906,6 +1295,11 @@ function renderLoop(t) {
     if (app.view.drawIfChanged()) {
       app.frames.renders += 1;
       fpsFrames += 1;
+    }
+    updateLegend(t);
+    if (app.card && app.card.visible) {
+      const settled = app.card.counts.settled;
+      if (app.card.draw(app.view.playTime, t)) updateSummary(t, app.card.counts.settled !== settled);
     }
   }
   if (!fpsSince) fpsSince = t;
@@ -1033,7 +1427,16 @@ window.__duet = Object.freeze({
       camera: app.view ? app.view.cameraMode : null,
       cameraDistance: app.view ? app.view.cameraDistance : null,
       cameraAzimuth: app.view ? app.view.cameraAzimuth : null,
-      help: app.help,
+      help: app.helpShown, // as shown; helpWanted: as asked for (H, the button, Start)
+      helpWanted: app.help,
+      xray: app.xray,
+      sensors: app.sensors,
+      sensorCard: app.cardMode, // off | full | compact | none (on, but no room)
+      // The walker framed clear of the right column (portrait phones and
+      // tablets): {scale, dx, dy, zone (client px)}, or null.
+      framing: app.framing ? { ...app.framing, zone: { ...app.framing.zone } } : null,
+      walker: app.walker ? { ...app.walker } : null, // the zone the layout keeps clear (framed or not)
+      walkerCovered: app.walkerCovered, // no room to frame it clear of the panels over it
       touch: app.touch,
       offscreen: app.offscreen,
       fps: app.fps,
@@ -1062,6 +1465,11 @@ window.__duet = Object.freeze({
       dropped: s ? s.dropped : 0,
       load: app.info ? app.info.loadTimes : null,
       backend: app.info ? { human: app.info.backend, osl: app.info.oslBackend, adapter: app.info.adapter, reason: app.info.reason } : null,
+      // The sensor card: draws, static redraws, draws skipped by the rate
+      // limit, settled draws (the play time stood still: a pause), draw time
+      // (ms: last, mean, p95, max of the last 128), the history held
+      // (samples, span s, epoch), frames with and without sensors.
+      sensors: app.card ? app.card.stats() : null,
     };
   },
   events() { return app.events.slice(); },
@@ -1070,6 +1478,56 @@ window.__duet = Object.freeze({
   pick(clientX, clientY, slop = PICK_SLOP) { return app.view ? app.view.pick(clientX, clientY, slop) : null; },
   project(point) { return app.view ? app.view.projectToClient(point) : null; },
   geomPoint(geom, local) { return app.view ? app.view.geomPoint(geom, local) : null; },
+  // The X-ray overlay as drawn: the anchor (world, and on screen), the wrench
+  // as drawn (F, T: world axes; null for frames without one, and for the
+  // state a reset starts from), each arrow's drawn length (m, 0 when hidden),
+  // tip and direction, their scales and colours, and the legend's numbers.
+  xray() {
+    const v = app.view;
+    if (!v) return null;
+    const info = v.xrayInfo();
+    const arrow = (a) => (a ? { shown: a.shown, length: a.length, direction: a.direction, tip: a.tip, origin: a.origin } : null);
+    return {
+      on: app.xray,
+      anchor: info.anchor,
+      anchorClient: info.anchor ? v.projectToClient(info.anchor) : null,
+      F: info.wrench ? info.wrench.slice(0, 3) : null,
+      T: info.wrench ? info.wrench.slice(3, 6) : null,
+      forceLength: info.force ? info.force.length : 0,
+      momentLength: info.moment ? info.moment.length : 0,
+      force: arrow(info.force),
+      moment: arrow(info.moment),
+      scale: { force: v.options.xray.force.scale, moment: v.options.xray.moment.scale },
+      colors: { force: v.options.xray.force.color, moment: v.options.xray.moment.color }, // as the renderer draws them
+      legend: el.xrayLegend ? { shown: isShown(el.xrayLegend), force: el.xrayForce.textContent, moment: el.xrayMoment.textContent } : null,
+    };
+  },
+  // The sensor charts as drawn: on, the card (shown, mode, box, its rows and
+  // the values shown at the time `at`, empty, noData, stats), the play time
+  // of the pose on screen, the sensor frame as drawn, and the markers
+  // (view.sensorMarkersInfo() plus `client`, their position on screen).
+  sensors() {
+    const v = app.view, card = app.card;
+    const box = el.sensorCard ? el.sensorCard.getBoundingClientRect().toJSON() : null;
+    return {
+      on: app.sensors,
+      card: {
+        shown: isShown(el.sensorCard), mode: app.cardMode, box,
+        ...(card ? card.info() : {}),
+        stats: card ? card.stats() : null,
+      },
+      playTime: v ? v.playTime : null,
+      drawn: v ? v.sensors : null,
+      markers: v ? v.sensorMarkersInfo().map((m) => ({ ...m, client: v.projectToClient(m.world) })) : [],
+    };
+  },
+  // Ask for a help mode (optional), then lay out the panels around the X-ray
+  // legend and the sensor card as a resize does; returns the help mode shown.
+  help(mode) {
+    if (mode !== undefined) app.help = mode;
+    layoutHud();
+    return app.helpShown;
+  },
 });
 
 // ------------------------------------------------------------------ main
@@ -1151,7 +1609,18 @@ async function main() {
   onButton(el.pause, togglePause);
   onButton(el.camera, cycleCamera);
   onButton(el.helpBtn, toggleHelp);
+  if (el.xrayBtn) onButton(el.xrayBtn, toggleXray);
+  if (el.sensorsBtn) onButton(el.sensorsBtn, toggleSensors);
   if (el.fast) onButton(el.fast, toggleFast);
+  window.addEventListener('resize', guard(layoutHud));
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(guard(() => {
+      layoutHud();
+      if (app.card) app.card.invalidate(); // the charts' text in the web fonts
+    }), () => { /* keep the fallback font's layout */ });
+  }
+  if (flag('xray')) setXray(true, true);
+  if (flag('sensors')) setSensors(true, true);
   for (const button of padButtons) {
     button.addEventListener('pointerdown', guard((e) => padPress(button, e)));
     for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
@@ -1163,6 +1632,11 @@ async function main() {
 
   const [demo, { DemoRenderer }] = await Promise.all([demoPromise, import('./render/scene.js')]);
   if (app.phase === 'failed') return;
+  // The sensor card (its history fills from now on, shown or not).
+  if (el.sensorCard) {
+    app.card = new SensorCard(el.sensorCard, demo);
+    layoutHud(); // its mode and visibility (?sensors=1)
+  }
   useBindings(demo.ui && demo.ui.bindings);
   if (app.level === null) app.level = demo.ui.default_level;
   refreshKbds();
@@ -1175,14 +1649,22 @@ async function main() {
   if (app.phase === 'failed') return;
 
   try {
-    app.view = new DemoRenderer(el.viewport, demo.visual, visual, { onRelease: giveBack });
+    const socket = demo.sim && demo.sim.socket;
+    app.view = new DemoRenderer(el.viewport, demo.visual, visual, { onRelease: giveBack, socketParent: socket ? socket.parent : null });
   } catch (error) {
     fail('The 3D view could not start. This demo needs WebGL 2 with hardware acceleration.', error);
     return;
   }
+  // The legend's swatches in the arrows' colours as the renderer draws them.
+  const xray = app.view.options.xray;
+  el.root.style.setProperty('--xray-force', xray.force.color);
+  el.root.style.setProperty('--xray-moment', xray.moment.color);
   watchContext(app.view.renderer.domElement);
   watchPointer(app.view.renderer.domElement);
   el.camera.dataset.mode = app.view.cameraMode;
+  app.view.setXray(app.xray); // ?xray=1: the standing model behind the loader is in X-ray too
+  app.view.setSensorMarkers(app.sensors); // ?sensors=1: and the markers on it
+  app.view.setFraming(app.framing); // and framed clear of the card
   if (heldFrame) {
     const frame = heldFrame;
     heldFrame = null;

@@ -9,6 +9,8 @@
 //   session.on('fall', (event) => ...);  // events, see below
 //   session.status();                    // HUD fields
 //   session.extract();                   // {frame, transfer} for the renderer, or null
+//   session.initial;                     // the reset state, before its first step
+//   session.sensorRow(out, offset);      // frame.sensors of the current state alone
 //
 // Loading (create): demo.json first (always revalidated: {cache: 'no-cache'}),
 // then concurrently the MuJoCo wasm, the physics model, the reference clips and
@@ -22,30 +24,78 @@
 // Command shaping (CommandShaper): between the keys (twistForKeys) and
 // SimCore.requestTwist, two rules hold a walk request back briefly. While one
 // holds, status() shows what is really commanded ('Starting…', 'Stopping…'),
-// not the keys.
+// not the keys. Both rules were set up on the R2 bundle (stage2_R2_model_6898,
+// 2026-11-16) and re-measured on bundle B, which the demo runs, on 2026-11-18
+// with DemoSession on WebGPU (Dawn, whose inference is deterministic: the same
+// key timing replays exactly). The numbers below are B's unless marked R2.
 // - Start gate. When a gait starts out of the idle clip, the idle clip's frame
-//   sets the stride's entry phase (GaitReference.switch). From the reset
-//   stance, entries at phase 0.2-0.5 start fastest and straightest; phase 0
-//   (double support, where a reset leaves the idle clock) is slow and veers
-//   (at 1.0 m/s: 1.6-1.8 m in the first 2.5 s against 1.2 m; at 1.2 m/s,
-//   2.2-2.5 m in 3 s in 8 of 8 gated starts). So the first walk after a reset
-//   waits for the idle clock to reach that window: at most 0.35 s, 0.12 s on
-//   average. Later starts are not gated: after a stop the feet stand wherever
-//   the last stride left them, and gating made no difference (1.97 against
-//   2.02 m in 3 s over 8 restarts). Turning in place is never gated.
-// - Forward after backward. Walking forward out of a backward walk is the
-//   policy's weakest transition: the body keeps moving backward under a
-//   forward reference, then falls. A forward request while the reference
+//   sets the stride's entry phase (GaitReference.switch). Out of the reset
+//   stance B falls when its first stride starts early in the first idle
+//   cycle. With the gate off, over 9 walking key sets (W, S and their arcs
+//   at level 3; W and its arcs with Shift), first walks fell within 4 s from
+//   11 of 20 starts at idle phase 0-0.18 (W and W+A only), 5 of 18 at
+//   0.2-0.22 (W, W+A, W+D, Shift+W+A), 0 of 27 at 0.24-0.28, 0 of 99 at
+//   0.3-0.5 and 3 of 62 at 0.52-0.98 (W+D, W+A); from the next idle cycle on
+//   (starts 0.6-1.3 s after the reset), 0 of 135. Starts at 0.3-0.5 were also
+//   the fastest and straightest: W at 1 m/s covered 1.83 m in its first 2.5 s,
+//   against 1.13 m from 0.2-0.28 and 0.20 m from 0-0.18. So the first walk
+//   after a reset waits for the idle phase to reach START_WINDOW: at most
+//   0.39 s, 0.16 s on average for a key pressed at a random time (R2's window
+//   [0.2, 0.5]: 0.34 s, 0.12 s). With keys pressed at 23 times from 0 to 1 s
+//   after a reset (those 9 key sets, A and D), R2's window let 15 of 253 first
+//   walks fall (W, W+A and Shift+W+A pressed within 0.1 s, which all started
+//   at 0.2), this one none. Backing up first has a window of its own,
+//   BACK_START_WINDOW (2026-11-19). At -0.7 m/s (levels 4 and 5) B's first
+//   backward stride falls from idle phase 0.40-0.68 (frames 20-34) in any
+//   idle cycle: with the gate off, S, S+A and S+D started at every frame of
+//   idle cycles 0-2 (and of cycles 3, 4 and 12 in part) fell 1.7-3.4 s later
+//   at 74 of 215 starts in those frames (S+A 53 of 81) and at none of 470
+//   elsewhere; at -0.5 and -0.6 m/s (levels 1-3) none of 753 starts fell,
+//   whatever the frame. START_WINDOW takes in frames 20-25: pressed every
+//   10 ms over the first 2 s after a reset, 40 of 1200 backward first walks
+//   at levels 4-5 fell (16 of 300 in the first idle cycle). BACK_START_WINDOW
+//   is frames 15-18, two short of the earliest fall: none of those 3000
+//   presses (levels 1-5) fell, and a backward first walk now waits at most
+//   0.46 s, 0.22 s on average (START_WINDOW: 0.39 s, 0.16 s).
+//   Later starts are not gated: after a stop the feet
+//   stand wherever the last stride left them, and restarts after a 0.2-1.4 s
+//   stop fell 0 of 26 times. Turning in place is never gated (A or D from the
+//   reset: 0 of 46 fell).
+// - Forward after backward. Walking forward out of a backward walk was R2's
+//   weakest transition: the body kept moving backward under a forward
+//   reference, then fell (R2: backing up at -0.7 m/s, then W at 1.2 m/s,
+//   directly or after a 0.3 s stop, fell 3 times in 20 trials without this
+//   rule and 0 times in 32 with it). A forward request while the reference
 //   walks backward, or before the body has come to rest after it, stands
 //   first: idle until the pelvis is slower than SHAPING.settleSpeed, at most
-//   SHAPING.maxHold after the key press. Measured with a seeded key-masher and
-//   paired transition trials (WebGPU, 2026-11-16): backing up at -0.7 m/s,
-//   then W at 1.2 m/s, directly or after a 0.3 s stop, fell 3 times in 20
-//   trials without the rule and 0 times in 32 with it; in the key-masher, 2 of
-//   the 4 falls without the rule started from a backward walk, none with it.
-//   The forward walk then starts 0.8-1.0 s after the key instead of 0.0-0.4 s.
-//   The same guard for forward -> backward did not help (the falls moved into
-//   the stop), so backing up is never held.
+//   SHAPING.maxHold after the key press. On B a forward walk straight out of a
+//   backward one then starts 0.4-1.0 s after the key (median 0.47 s) instead
+//   of at once (R2: 0.8-1.0 s). Re-measured on B (2026-11-18 retune check,
+//   paired trials with and without the rule: S, S+A or S+D held 0.9-2.9 s at
+//   levels 2-5, then W, W+A, W+D or Shift+W, directly or after a 0.05-0.75 s
+//   stop; 186 distinct sequences): of 130 direct reversals none fell with the
+//   rule and 4 without it (exact McNemar p 0.125), and without it the body
+//   kept drifting backward (under 0.3 m forward in the first 3 s: 33 of 130,
+//   against 12 with the rule, p 0.001; peak site error lower with the rule in
+//   107 of 126). After a stop it costs falls in one family: S for 2.63 s at
+//   level 5, a stop of 0.05-0.4 s, then W fell 5 times with the rule and
+//   never without it (all 56 after a stop: 6 against 1, p 0.063). On balance
+//   the rule is kept; maxHold: 0 turns it off. The key-masher falls as often
+//   either way (130 seeds x 30 s: 47 falls with the rule, 45 without). The
+//   same guard for forward -> backward did not help on R2 (the falls moved
+//   into the stop), so backing up is never held.
+// Not adopted on B: standing before backing up right after a turn in place,
+// and straightening a fast arc before stopping. Without them, those
+// transitions fell 0 of 72 times (A or D 1-2 s, S 1-3 s, stop) and 0 of 42
+// (Shift+W+A or Shift+W+D 1.5-3.5 s, stop). B's remaining falls are rare and
+// spread out: 11 in 469 transition trials (turns, stops, reversals, level
+// changes, taps and restarts at 1-3 s offsets), 7 of them in a stop, at most
+// 3 of 36 in any one kind. Key-mashing with this shaping (START_WINDOW
+// [0.3, 0.5], the rule above; WebGPU, 30 s per seed, pooled over the
+// 2026-11-18 checks): 5.7 falls per 10 min in the casual profile (40 in
+// 70 min) and 7.8 in the stress profile (51 in 65 min). BACK_START_WINDOW
+// changed 2 of 80 further seeds (a backward first walk pressed at idle frames
+// 19-25) and no fall: 7 and 8 falls in 20 min each, with or without it.
 //
 // Falls: when SimCore reports a failure, the session relaxes every actuator
 // (muscle excitation 0, OSL torque 0) and keeps stepping the physics for
@@ -76,15 +126,20 @@ const defaultClock = () => (globalThis.performance ? performance.now() : Date.no
 // server reports the real length.
 export const WASM_BYTES_ESTIMATE = 2475508;
 
-// Entry-phase window for the first walk after a reset (fraction of the idle clip).
-export const START_WINDOW = [0.2, 0.5];
+// Entry-phase window for the first walk after a reset (fraction of the idle
+// clip: frames 15-25 of its 50). Bundle B's, see the header; R2's was
+// [0.2, 0.5].
+export const START_WINDOW = [0.3, 0.5];
+// The same for a first walk backward: frames 15-18 (see the header).
+export const BACK_START_WINDOW = [0.3, 0.36];
 const IDLE_TWIST = Object.freeze([0, 0, 0]);
 
 // Command shaping parameters (see the header); DemoSession's `shaping` option
 // overrides them, e.g. {startWait: 0, maxHold: 0} turns both rules off.
 export const SHAPING = Object.freeze({
   startWindow: START_WINDOW,
-  startWait: 0.4, // s: the longest the start gate holds a walk back
+  backStartWindow: BACK_START_WINDOW,
+  startWait: 0.5, // s: the longest the start gate holds a walk back (START_WINDOW needs 0.39 s at most, BACK_START_WINDOW 0.46 s)
   settleSpeed: 0.35, // m/s: pelvis speed (EMA) under which the body has come to rest
   settleTau: 0.15, // s: time constant of that EMA
   maxHold: 1.0, // s: the longest forward-after-backward holds a forward request back
@@ -117,6 +172,7 @@ export class CommandShaper {
     const steps = (s) => Math.max(0, Math.round(s / dt));
     this.config = c;
     this.window = c.startWindow;
+    this.backWindow = c.backStartWindow || c.startWindow;
     this.maxWait = steps(c.startWait);
     this.maxHold = steps(c.maxHold);
     this.settleSpeed = c.settleSpeed;
@@ -174,8 +230,8 @@ export class CommandShaper {
       }
     }
     if (dir !== 0 && this.fresh && ref.idle && this.wait < this.maxWait) {
-      const phase = ref.phase;
-      if (!(phase >= this.window[0] && phase <= this.window[1])) {
+      const phase = ref.phase, w = dir < 0 ? this.backWindow : this.window;
+      if (!(phase >= w[0] && phase <= w[1])) {
         return { twist: IDLE_TWIST, reason: 'start', label: STARTING, moving: true };
       }
     }
@@ -279,9 +335,11 @@ export const backendLabel = (backend) => (backend === 'webgpu' ? 'WebGPU' : 'CPU
 // digits). Here m is about 0.9-1.3 kg at a hand, 4 kg at a forearm or upper
 // arm, 10 kg at the head, 25 kg at the pelvis and 33 kg at the chest.
 //
-// Tuned in closed loop for the demo (DemoSession on WebGPU, 2026-11-16: a
-// sideways pull ramped in over 0.1 s, held 1 s, released; a fall is the
-// session's failure check). The departures from the viewer, in DRAG:
+// Tuned in closed loop for the demo on the R2 bundle (stage2_R2_model_6898;
+// DemoSession on WebGPU, 2026-11-16: a sideways pull ramped in over 0.1 s,
+// held 1 s, released; a fall is the session's failure check). The trial
+// outcomes below are R2's and have not been re-measured on bundle B, which the
+// demo runs since 2026-11-18. The departures from the viewer, in DRAG:
 // - maxMass. With the viewer's m the trunk spring is 2500-3300 N/m: 0.35 m on
 //   the standing pelvis peaked at 660 N and it fell; capped at 400 N it
 //   recovered standing, but both 0.35 m pulls while walking fell. m counts at
@@ -536,6 +594,19 @@ export class DragSpring {
   }
 }
 
+// The frames' extras (render/frame.js: frame.wrench, the socket load on the
+// limb, and frame.sensors, the OSL's sensor frame) need demo.sim. A demo.json
+// the extras cannot use keeps the plain frames: the page treats the extras as
+// optional.
+function makeExtractor(mujoco, model, demo) {
+  try {
+    return new FrameExtractor(mujoco, model, demo.visual, demo.sim);
+  } catch (error) {
+    console.warn('Frames without the sensor and socket extras:', error);
+    return new FrameExtractor(mujoco, model, demo.visual);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // DemoSession
 // ---------------------------------------------------------------------------
@@ -657,7 +728,7 @@ export class DemoSession {
     this.core.disturb = this.drag.hook;
     this.shaper = new CommandShaper(this.core, demo.sim.policy_dt, shaping);
     this.shaped = null; // the last step's shaping decision
-    this.extractor = new FrameExtractor(mujoco, model, demo.visual);
+    this.extractor = makeExtractor(mujoco, model, demo);
     this.dt = demo.sim.policy_dt;
     this.decimation = demo.sim.decimation;
     this.fallSteps = Math.max(1, Math.round(fallSeconds / this.dt));
@@ -893,6 +964,25 @@ export class DemoSession {
   }
 
   recycle(buffer) { this.extractor.recycle(buffer); }
+
+  // Whether the state is the one a reset (or the load) starts from: SimCore
+  // has run no control step since (a step a reset discarded counts as none).
+  // Its frame extras are not a measurement: standing in the reset pose on the
+  // uncompressed socket piston, the socket passes about 26 N and the IMU reads
+  // about 3 g while the floor pushes the foot up (bundle B); one step later
+  // the socket carries the body. worker.js marks such frames (frame.initial).
+  get initial() { return this.core.steps === 0; }
+
+  // frame.sensors' length (0: the frames carry no sensor frame).
+  get sensorCount() { return this.extractor.sensorCount || 0; }
+
+  // frame.sensors of the current state into out[offset ..] (worker.js: the
+  // sensor rows of the steps whose frame did not go out). Returns the values
+  // written: 0 for a state that cannot be drawn or an initial one.
+  sensorRow(out, offset = 0) {
+    if (!this.drawable || this.initial) return 0;
+    return this.extractor.readSensors(this.data, out, offset);
+  }
 
   get backend() { return backendLabel(this.policies.human.backend); }
 

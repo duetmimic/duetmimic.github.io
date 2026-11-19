@@ -15,7 +15,10 @@
 <h1>MLP engine check</h1>
 <p>Runs <code>demo/js/nn</code> inside a module Web Worker, as the demo does, and compares
 the WebGPU and CPU backends on the exported weights. Serve the repository root over
-http://127.0.0.1 (tools/test/nn_browser.test.mjs does) and open this page.</p>
+http://127.0.0.1 (tools/test/nn_browser.test.mjs does) and open this page
+(<code>?assets=/path/to/folder/</code> picks another asset folder than demo/assets/stage2,
+<code>&amp;reference=/path/to/nn_reference.bin.gz</code> its reference outputs; by default
+tools/traces/nn_reference.bin.gz, the demo folder's).</p>
 <pre id="log">running...</pre>
 <script type="module">
 // The worker is built from a Blob so that tools/test holds no stray .js file
@@ -24,8 +27,9 @@ http://127.0.0.1 (tools/test/nn_browser.test.mjs does) and open this page.</p>
 const root = new URL('../../', location.href);
 const engine = new URL('demo/js/nn/index.js', root).href;
 const containers = new URL('demo/js/lib/container.js', root).href;
-const assets = new URL('demo/assets/r2/', root).href;
-const reference = new URL('tools/traces/nn_reference.bin.gz', root).href;
+const params = new URLSearchParams(location.search);
+const assets = new URL(params.get('assets') || 'demo/assets/stage2/', root).href;
+const reference = new URL(params.get('reference') || 'tools/traces/nn_reference.bin.gz', root).href;
 
 const cpuModule = new URL('demo/js/nn/cpu.js', root).href;
 

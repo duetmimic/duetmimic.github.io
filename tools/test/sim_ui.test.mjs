@@ -10,13 +10,13 @@ import { loadContainer, loadJSON } from '../../demo/js/lib/container.js';
 import {
   ActuatorDelay, CommandSupport, GaitReference, PreviousCommand, levelForKey, twistForKeys, uiTwists,
 } from '../../demo/js/sim/index.js';
+import { ASSETS } from './paths.mjs';
 
-const REPO = new URL('../../', import.meta.url);
 let demo, reference, ref, support;
 
 before(async () => {
-  demo = await loadJSON(new URL('demo/assets/r2/demo.json', REPO));
-  reference = await loadContainer(new URL('demo/assets/r2/reference.bin.gz', REPO));
+  demo = await loadJSON(new URL('demo.json', ASSETS));
+  reference = await loadContainer(new URL('reference.bin.gz', ASSETS));
   ref = new GaitReference(demo.reference, reference.arrays);
   support = new CommandSupport(demo.reference, ref);
 });

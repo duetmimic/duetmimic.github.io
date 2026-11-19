@@ -13,12 +13,17 @@
 //  3. demo/ on its own: no console errors, the worker loads MuJoCo and both
 //     policies, the nn backend is chosen (the CPU path must work everywhere),
 //     Start, W moves the model, W+A, pause stops the clock, R and the Reset
-//     button reset, C cycles through the three camera modes; frame rate and
+//     button reset, C cycles through the three camera modes, X turns the
+//     X-ray view on (its ghost shader runs: muscles hidden, socket load
+//     arrows, legend) and off, G the sensor charts (the card's canvases drawn,
+//     the markers' shader runs, each marker on its geom point); frame rate and
 //     real-time factor;
 //  4. phone emulation (iPhone 13 in WebKit, Pixel 7 in Chromium, a 390x844
 //     touch viewport in Firefox): no horizontal scroll, the project page shows
 //     the touch note instead of the key list, the demo loads from the project
-//     page and on its own, its panels stay on screen.
+//     page and on its own, the X-ray and sensor-chart buttons work, the panels
+//     (the X-ray legend and the compact sensor card too) stay on screen and
+//     apart.
 //
 //   cd tools
 //   DUET_COMPAT_TESTS=1 PLAYWRIGHT_BROWSERS_PATH=<ms-playwright> \
@@ -55,7 +60,9 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = fileURLToPath(new URL('../../', import.meta.url));
+import { ASSETS_DIR, REPO } from './paths.mjs';
+
+const ROOT = fileURLToPath(REPO);
 const PORT = Number(process.env.COMPAT_PORT || 8831);
 const BASE = `http://127.0.0.1:${PORT}`;
 const OUT = process.env.COMPAT_SHOTS_DIR || fileURLToPath(new URL('../out/compat/', import.meta.url));
@@ -231,11 +238,12 @@ async function capabilities(page) {
 // and a median over 5 more runs. JavaScriptCore keeps 'int8', V8 and
 // SpiderMonkey keep 'packed' (demo/js/nn/cpu.js).
 async function cpuKernels(page) {
-  return page.evaluate(async () => {
+  // The demo page's own asset folder (app.js), not a DUET_ASSETS override.
+  return page.evaluate(async (assets) => {
     const source = `self.onmessage = async () => {
       try {
         const { loadPolicy } = await import('${location.origin}/demo/js/nn/index.js');
-        const policy = await loadPolicy('${location.origin}/demo/assets/r2/human.bin.gz', { backend: 'cpu' });
+        const policy = await loadPolicy('${location.origin}/${assets}human.bin.gz', { backend: 'cpu' });
         const x = new Float32Array(policy.inputSize);
         const times = [];
         for (let i = 0; i < 6; i++) { const t = performance.now(); await policy.run(x); times.push(performance.now() - t); }
@@ -256,7 +264,7 @@ async function cpuKernels(page) {
     } finally {
       worker.terminate();
     }
-  });
+  }, ASSETS_DIR);
 }
 
 // The frame's box in the viewport once a smooth scroll has settled.
@@ -476,6 +484,44 @@ for (const engine of ENGINES) {
           assert.deepEqual([firstMode, ...modes.slice(0, 2)].sort(), ['chase', 'follow', 'free'], `camera modes ${firstMode} > ${modes.join(' > ')}`);
           assert.equal(modes[2], firstMode, 'three presses of C come back to the first mode');
 
+          // X-ray view (its ghost shader compiles in this engine): X turns it
+          // on (muscles hidden, arrows from the socket anchor, the legend), X
+          // again off (muscles back).
+          await page.keyboard.press('KeyX');
+          await sleep(800);
+          const xr = await page.evaluate(() => ({ s: window.__duet.state(), x: window.__duet.xray(), r: window.__duet.stats().render }));
+          assert.ok(xr.s.xray && xr.r.xray && !xr.r.muscles, 'X turns the X-ray view on');
+          assert.ok(xr.x.anchor && xr.x.anchorClient && xr.x.F && xr.x.legend.shown, 'the arrows and the legend');
+          st.diagnostic(`X-ray: ${xr.r.calls} draw calls, |F| ${Math.hypot(...xr.x.F).toFixed(0)} N (${xr.x.forceLength.toFixed(3)} m), legend ${xr.x.legend.force} N, ${xr.x.legend.moment} N m`);
+          await page.screenshot({ path: path.join(OUT, `${engine}_xray.png`) });
+          await page.keyboard.press('KeyX');
+          await sleep(500);
+          const xo = await page.evaluate(() => ({ s: window.__duet.state(), r: window.__duet.stats().render }));
+          assert.ok(!xo.s.xray && xo.r.muscles && xo.r.segments > 0, 'X turns it off, the muscles come back');
+
+          // Sensor charts (the card's canvas 2D and the markers' shader in this
+          // engine): G shows the card, drawn, and the markers on their geoms.
+          await page.keyboard.press('KeyG');
+          await sleep(1500);
+          const sc = await page.evaluate(() => {
+            const d = window.__duet, x = d.sensors();
+            const live = document.querySelector('#sensor-card canvas.sc-live');
+            const px = live.getContext('2d').getImageData(0, 0, live.width, live.height).data;
+            let inked = 0;
+            for (let i = 3; i < px.length; i += 4) if (px[i] > 0) inked += 1;
+            const off = x.markers.map((m) => { const w = d.project(d.geomPoint(m.geom_id, m.local)); return Math.hypot(m.client[0] - w[0], m.client[1] - w[1]); });
+            return { s: d.state(), r: d.stats().render, card: x.card, inked, off: Math.max(...off), markers: x.markers.length };
+          });
+          st.diagnostic(`sensor charts: card ${sc.card.mode}, ${sc.card.stats.draws} draws (${sc.card.stats.ms && sc.card.stats.ms.p95} ms p95), ${sc.inked} pixels inked, ` +
+            `${sc.markers} markers within ${sc.off.toFixed(3)} px of their geom points`);
+          assert.ok(sc.s.sensors && sc.card.shown && sc.card.mode === 'full' && sc.r.markers, 'G shows the card and the markers');
+          assert.ok(sc.card.stats.draws > 0 && sc.inked > 500, 'the card is drawn');
+          assert.ok(sc.markers === 6 && sc.off < 1.5, 'each marker on its geom point');
+          await page.screenshot({ path: path.join(OUT, `${engine}_sensors.png`) });
+          await page.keyboard.press('KeyG');
+          await sleep(300);
+          assert.ok(!(await state(page)).sensors, 'G turns them off');
+
           // Frame rate and real-time factor while walking.
           await sleep(500);
           const m0 = await state(page);
@@ -540,9 +586,17 @@ for (const engine of ENGINES) {
           await demo.tap('#start-btn');
           await demo.waitForFunction(() => window.__duet.state().running, null, { timeout: 5000 });
           await sleep(1000);
+          // The X-ray and sensor-chart buttons (the touch way in), then the
+          // panels with the legend and the compact card.
+          await demo.tap('#btn-xray');
+          await demo.waitForFunction(() => window.__duet.state().xray, null, { timeout: 5000 });
+          await demo.tap('#btn-sensors');
+          await demo.waitForFunction(() => window.__duet.state().sensors, null, { timeout: 5000 });
+          await sleep(800);
+          const names = ['topbar', 'help', 'back', 'viewbar', 'legend', 'card', 'pad'];
           const layout = await demo.evaluate(() => {
-            const out = { coarsePointer: matchMedia('(pointer: coarse)').matches };
-            for (const [name, selector] of [['topbar', '.topbar'], ['help', '#help'], ['back', '#back-link']]) {
+            const out = { coarsePointer: matchMedia('(pointer: coarse)').matches, card: null, mode: window.__duet.state().sensorCard };
+            for (const [name, selector] of [['topbar', '.topbar'], ['help', '#help'], ['back', '#back-link'], ['viewbar', '#viewbar'], ['legend', '#xray-legend'], ['card', '#sensor-card'], ['pad', '#touch-pad']]) {
               const node = document.querySelector(selector);
               const style = getComputedStyle(node);
               if (node.hidden || style.display === 'none') continue;
@@ -554,11 +608,20 @@ for (const engine of ENGINES) {
             return out;
           });
           st.diagnostic(`demo/ layout: ${JSON.stringify(layout)}`);
-          for (const name of ['topbar', 'help', 'back']) {
+          for (const name of names) {
             const b = layout[name];
             if (!b) continue;
             assert.ok(b.left >= -0.5 && b.top >= -0.5 && b.right <= layout.width + 0.5 && b.bottom <= layout.height + 0.5, `${name} on screen`);
           }
+          for (let i = 0; i < names.length; i++) {
+            for (let j = i + 1; j < names.length; j++) {
+              const a = layout[names[i]], b = layout[names[j]];
+              if (!a || !b) continue;
+              assert.ok(!(a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5), `${names[i]} and ${names[j]} apart`);
+            }
+          }
+          assert.ok(layout.viewbar && layout.legend, 'the X-ray toggle and its legend show');
+          assert.ok(layout.card && layout.mode === 'compact', `the compact sensor card shows (${layout.mode})`);
           await demo.screenshot({ path: path.join(OUT, `${engine}_phone_demo.png`) });
           assert.deepEqual([...errors, ...demoErrors], []);
         } finally {

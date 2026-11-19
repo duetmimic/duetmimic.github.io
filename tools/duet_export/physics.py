@@ -38,7 +38,8 @@ closed loop (walking), random and zero controls (falls), from penetrating
 poses (also with multi-CCD on) and through every geom-distance query against
 the collision meshes. The numbers go into demo.json; the native trace the WASM
 test (tools/test/physics.test.mjs) compares against goes to
-tools/test/physics_wasm_ref.bin.gz.
+tools/test/physics_wasm_ref.bin.gz (tracked) for the demo's own asset folder,
+and into the --out folder for any other (common.golden_path).
 """
 
 import hashlib
@@ -49,11 +50,11 @@ import mujoco
 import numpy as np
 
 from . import mjb
-from .common import load_bundle
+from .common import golden_path, load_bundle
 from .container import write_container, write_gzip
 
 FILE = "physics.mjb.gz"
-WASM_REF = Path(__file__).resolve().parents[1] / "test" / "physics_wasm_ref.bin.gz"
+WASM_REF_NAME = "physics_wasm_ref.bin.gz"  # golden for physics.test.mjs; golden_path places it
 
 HILLCLIMB_MIN = 10  # mjMESH_HILLCLIMB_MIN, engine_collision_convex.h (3.11.0)
 MESH = int(mujoco.mjtGeom.mjGEOM_MESH)
@@ -741,7 +742,9 @@ def export(bundle_dir, out_dir, ctx):
     nbytes = write_gzip(out_dir / FILE, slim_raw)
     arrays, meta = wasm_reference(bundle_dir, slim_raw)
     meta["physics_sha256"] = hashlib.sha256(slim_raw).hexdigest()
-    write_container(WASM_REF, arrays, meta)
+    wasm_ref = golden_path(out_dir, WASM_REF_NAME)
+    write_container(wasm_ref, arrays, meta)
+    print(f"[physics] native trace for physics.test.mjs: {wasm_ref}")
 
     stripped = {k: [info["sizes_before"][k], info["sizes_after"][k]] for k in _MESH_SIZES}
     print(_summary(dynamics))

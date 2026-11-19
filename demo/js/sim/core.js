@@ -95,6 +95,16 @@ export class SimCore {
     }
     if (covered.some((c) => c !== 1)) throw new Error('The controllers must drive every actuator exactly once');
     this.outputSize = { human: sim.human.action.size, osl: sim.osl.action.size };
+    // A loaded network states its sizes (nn/loadPolicy); one from another export
+    // than demo.json would otherwise fail only at the first step.
+    for (const name of ['human', 'osl']) {
+      const p = policies && policies[name];
+      const want = [sim[name].observation.size, sim[name].action.size];
+      if (p && p.inputSize !== undefined && (p.inputSize !== want[0] || p.outputSize !== want[1])) {
+        throw new Error(`The ${name} network maps ${p.inputSize} inputs to ${p.outputSize}, demo.json expects `
+          + `${want[0]} to ${want[1]}: the assets come from different exports`);
+      }
+    }
     this.humanInput = new Float32Array(sim.human.observation.size);
     this.oslInput = new Float32Array(sim.osl.observation.size);
     this.lastMeans = {

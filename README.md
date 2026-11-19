@@ -8,9 +8,11 @@ repository `duetmimic/duetmimic.github.io` at <https://duetmimic.github.io/>.
   video, the embedded interactive demo, the abstract and BibTeX. Placeholders
   still to fill are marked `<!-- TODO -->`; see [Before publishing](#before-publishing).
 - `demo/`: the interactive demo. It runs the stage-2 split-network unicycle
-  policy (osl_deploy bundle `stage2_R2_model_6898`) in the browser. A human
-  policy drives the 339 muscles and an onboard policy drives the Open-Source
-  Leg's knee and ankle. You steer it with W/A/S/D, or with the on-screen pad on
+  policy (bundle B: mjlab run `2026-11-15_20-24-39_s2_r6s7_B_decr025`,
+  checkpoint `model_6498`) in the browser. A human policy drives the 339
+  muscles and an onboard policy drives the Open-Source Leg's knee and ankle
+  from the leg's encoders, shank IMU, ankle load cell and heel and toe
+  contact. You steer it with W/A/S/D, or with the on-screen pad on
   a touch screen, and you can drag a body part with the mouse or a finger to
   pull it off balance. Physics is the official MuJoCo 3.11.0 WebAssembly build.
   Rendering is three.js, and inference uses WebGPU where available, otherwise
@@ -37,6 +39,26 @@ There is no build step. Everything is static HTML, CSS and ES modules.
   resets, **C** cycles the camera (behind the walker, fixed angle, free),
   **H** toggles the help. On a touch screen the pad's arrows hold W/A/S/D and
   Fast toggles top speed; one thumb can walk while the other pulls.
+- **X** (or the button at the top right) toggles the X-ray view: the muscles
+  hidden, the bones and the socket see-through, the rest of the prosthesis
+  as it is, and two arrows at the socket for the force (green) and the moment
+  (violet, double-headed) that the prosthesis applies to the residual limb,
+  with their sizes in a legend. It works running or paused and stays on
+  through resets and camera changes; `?xray=1` starts in it.
+- **G** (or the button beside it) toggles the sensor charts: a card of strip
+  charts of what the prosthesis itself measures over the last 3 s (its IMU's
+  gyro and accelerometer, the ankle load cell's force and moment, heel and
+  toe contact, the knee and ankle encoders), and a marker on the leg at each
+  sensor in the same colour (IMU sky blue, load cell jade, foot contact gold,
+  encoders rose; the heel and toe markers fill as they bear load and are drawn
+  over the others). The charts get every 10 ms control step, also when the
+  page draws slowly. On short
+  windows and phones the card shows three rows (gyro, force, contact); on a
+  phone held upright it spans the top of the screen and the walker is drawn
+  smaller below it, so the card never covers it (the same happens where the
+  X-ray legend would). Where there is no room for the card at all, a toast
+  says so. It works with or without the X-ray view, running or paused;
+  `?sensors=1` starts with it.
 
 The demo's help panel (`demo/index.html`) and the landing page's key list
 (`index.html`) say the same in fewer words; keep the three in step.
@@ -56,26 +78,41 @@ WebGPU is available there in browsers that support it.
 
 ## Regenerating the demo assets
 
-The files in `demo/assets/r2/` are written by the exporter in
-`tools/duet_export/`. It reads the osl_deploy bundle and never modifies it.
+The files in `demo/assets/stage2/` are written by the exporter in
+`tools/duet_export/`. It reads the bundle through osl_deploy and never
+modifies either.
 Run it in the `osl-deploy` Conda environment (MuJoCo 3.11.0, numpy, scipy,
 onnxruntime):
 
 ```sh
 source ~/miniconda3/etc/profile.d/conda.sh && conda activate osl-deploy
 cd tools
-python -m duet_export --out ../demo/assets/r2                 # every section
-python -m duet_export --out ../demo/assets/r2 --only sim      # one section
+python -m duet_export --out ../demo/assets/stage2                 # every section
+python -m duet_export --out ../demo/assets/stage2 --only sim      # one section
 ```
 
-The default bundle is `../osl_deploy/bundles/stage2_R2_model_6898`: an
-osl_deploy checkout beside this repository. Pass `--bundle` to use another one. Sections
+The default bundle is B,
+`mjlab/logs/stage1_imports/wandb_exports/2026-11-15_20-24-39_s2_r6s7_B_decr025/deploy/model_6498`
+in an mjlab checkout beside `01_projpegleg/` (`DEFAULT_BUNDLE` in
+`tools/duet_export/common.py`; `tools/test/paths.mjs` names the same folder
+for the checks). Pass `--bundle` to use another one. Sections
 are `physics`, `visual`, `policies` and `sim`. Each one rewrites its own files
-and its own keys of `demo.json`. Every run, whichever sections it exports,
-also rewrites `demo.json`'s `versions`: a short content hash of every asset
-file, which the demo uses for cache busting (see
+and its own keys of `demo.json`, which records the bundle manifest each section
+came from (`sections`). An `--only` run from another bundle than the sections
+it keeps is refused (`--allow-mixed` overrides): two bundles' models can share
+every id, so such a mix runs but is wrong without any error. Every run,
+whichever sections it exports, also rewrites `demo.json`'s `versions`: a short
+content hash of every asset file, which the demo uses for cache busting (see
 [Caching](#size-bandwidth-and-caching)). See `tools/DESIGN.md` for what each
 file holds.
+
+The `physics` and `policies` sections also write the goldens that
+`test/physics.test.mjs` and `test/nn.test.mjs` compare against. With
+`--out ../demo/assets/stage2` they go to `tools/test/physics_wasm_ref.bin.gz`
+(tracked, so a re-export shows up in the commit) and
+`tools/traces/nn_reference.bin.gz` (git-ignored). With any other `--out` they
+go into that folder, so an export into a scratch folder leaves the
+repository's goldens alone.
 
 ## Developer checks
 
@@ -89,17 +126,29 @@ somewhere other than Playwright's default folder. All commands run from
 
 - `node --test test/e2e_session.test.mjs`: the demo's simulation side
   (DemoSession) in Node on the real assets: a scripted WASD schedule, the
-  command shaping, backward steering (S+A curves to the walker's left), a
+  command shaping (the first walk after a reset, forward and arcs and, at
+  -0.7 m/s, backward, pressed at several moments: no fall, released inside
+  its start window), backward steering (S+A curves to the walker's left), a
   fixed-seed key-masher, falls, pulling (a sideways pull standing and walking,
   `xfrc_applied` and the force caps, a pull through a fall, invalid requests),
   cache-busting versions and fail-fast loading. Inference uses WebGPU through
   Dawn when it finds a hardware adapter; `E2E_BACKEND=cpu|webgpu` forces one,
   `E2E_MASH_SECONDS` sets the masher's length.
 - `DUET_BROWSER_TESTS=1 [E2E_GPU=1] [E2E_SHOTS_DIR=<folder>] [E2E_PORT=8741] node --test test/e2e_browser.test.mjs`
-  drives the real demo page in headless Chromium for about a minute, including
+  drives the real demo page in headless Chromium for a few minutes, including
   pulling a body part with the mouse (standalone, paused, embedded) and with a
-  finger. Add `E2E_GPU=1` for a hardware GPU (Chromium flags
-  `--use-angle=vulkan --enable-unsafe-webgpu --enable-features=Vulkan`).
+  finger, the X-ray view (X and its button, through reset, camera and pause,
+  `?xray=1`, where the reset pose behind the loader shows no load), the
+  sensor charts (G and its button: the card drawn and in step with the pose,
+  every control step in its history, its range labels inside the card, the
+  markers on their geoms, pause, reset, both views, `?sensors=1`; on a phone,
+  the card across the top and the walker framed below it) and the panel layout at about 6,400 window sizes (also the
+  landing page's iframe sizes, with and without the X-ray legend and the
+  sensor card, and the walker kept clear of both). Add `E2E_GPU=1` for a
+  hardware GPU (Chromium flags
+  `--use-angle=vulkan --enable-unsafe-webgpu --enable-features=Vulkan`); it
+  also measures the frame rate and real-time factor with the X-ray view, the
+  sensor charts and both against neither, and the charts' draw time.
 - `DUET_COMPAT_TESTS=1 [COMPAT_ENGINES=chromium,firefox,webkit] [COMPAT_GPU=1] [COMPAT_WEBKIT_LIBS=<dir>] [COMPAT_SHOTS_DIR=<folder>] [COMPAT_PORT=8831] node --test test/compat_browsers.test.mjs`
   runs the project page and the demo in Chromium, Firefox and WebKit, each
   also in phone emulation. An engine that is not installed or cannot start
@@ -114,11 +163,46 @@ somewhere other than Playwright's default folder. All commands run from
   engine in a module worker in headless Chromium, WebGPU against the CPU.
   `tools/test/nn_browser.html` also runs by hand in any browser, for example
   Safari on a Mac, served from the repository root.
-- `DUET_BROWSER_TESTS=1 [RENDER_SHOTS_DIR=<folder>] node --test test/render_shots.test.mjs`:
-  renderer screenshots of fixture poses, the camera modes, and picking for the
-  drag (grabbed points checked against MuJoCo's own geom frames).
+- `DUET_BROWSER_TESTS=1 [E2E_GPU=1] [RENDER_SHOTS_DIR=<folder>] [RENDER_MODEL=bundle] node --test test/render_shots.test.mjs`:
+  renderer screenshots of fixture poses, the camera modes, picking for the
+  drag (grabbed points checked against MuJoCo's own geom frames), and the
+  X-ray view (ghosts by part, the socket load arrows against MuJoCo's socket
+  anchor, the exact way back) and the sensor markers (each at its sensor in
+  MuJoCo and drawn there, the contact glyphs by force, the way back), with the
+  slim physics model (`RENDER_MODEL=bundle`: the bundle's own 103 MB model).
+  `E2E_GPU=1` renders on the hardware GPU.
+- `test/sensors.test.mjs` (in `npm test`) checks the sensor charts' data
+  side: the rows against the asset folder's sensor channels (also named by
+  their reads when `demo.json` lacks the names), the group and line colours
+  against the scene's (the dataviz distances, from `demo/js/render/palette.js`
+  and the covers' colour in `demo.json`), the history ring, and the card's
+  intake (the rows of skipped steps, the reset state left out).
+- `test/sensor_stream.test.mjs` (in `npm test`) runs the real worker
+  (`demo/js/worker.js`) in Node behind a stand-in `self`, on the CPU, and
+  hands its frames back late so that it skips most of them: every control
+  step's sensor row must still reach the card once, in order, with that
+  step's values, through a reset and a fall.
+- `test/frame_extras.test.mjs` (in `npm test`) checks what the X-ray view and
+  the sensor charts draw from: `demo.json`'s `sim.socket`, the OSL channels
+  and read anchors and `visual.overlays` against the physics model (the
+  markers and the socket anchor at six random poses, the touch zones' glyphs
+  where each zone meets the foot), the frame layout, recycling, and the
+  wrench's sign without the `cfrc_int` formula. Its trace checks (the wrench
+  and the sensor frame against osl_deploy at every control boundary) need
+  `tools/traces/trace.bin.gz` and skip without it, like the trace tests in
+  `test/sim.test.mjs` below.
 - The trace tests in `test/sim.test.mjs` skip until you regenerate their
-  ground truth with `python -m duet_export.trace` (git-ignored, 22 MB).
+  ground truth with `python -m duet_export.trace` (`tools/traces/trace.bin.gz`,
+  git-ignored, 22 MB), and skip a stale trace, recorded from another bundle
+  than the assets.
+- `test/contract.test.mjs` checks that every section of the asset folder comes
+  from one bundle and that the touch zones in `physics.mjb.gz` are that
+  bundle's.
+- The checks find the assets, the bundle and the trace through
+  `tools/test/paths.mjs`; `DUET_ASSETS`, `DUET_BUNDLE` and `DUET_TRACE`
+  override them. The physics and network goldens follow the asset folder:
+  with `DUET_ASSETS` set to another folder, the checks read the goldens inside
+  it, which an export with that folder as `--out` writes.
 
 ### Page media
 
@@ -241,6 +325,12 @@ prepare the working tree and stop there.
   therefore changes the URL of every file it changes. The JavaScript modules
   and `demo/vendor/` are not versioned, so code can lag a deploy by up to 10
   minutes.
+- **Renaming the asset folder.** For those same 10 minutes, a cached old
+  `app.js` still asks for the old folder's `demo.json` and gets a 404 if the
+  folder is gone, so that visitor sees the error overlay until a reload. The
+  switch to bundle B (2026-11-18) moved the assets from `demo/assets/r2/` to
+  `demo/assets/stage2/` and removed the R2 controller entirely (user decision:
+  no fallback, no switching), accepting that window.
 
 ## Licenses and credits
 

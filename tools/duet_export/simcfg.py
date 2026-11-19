@@ -1,6 +1,6 @@
 """Export section `sim`: everything SimCore needs, plus reference.bin.gz.
 
-    cd tools && python -m duet_export --out ../demo/assets/r2 --only sim
+    cd tools && python -m duet_export --out ../demo/assets/stage2 --only sim
 
 SimCore (demo/js/sim/) is the browser port of osl_deploy's synchronous
 runner.Simulation for a stage-2 bundle at its default settings: lockstep
@@ -16,8 +16,21 @@ demo.json keys written here:
   muscles, foot touch sensors), each controller's observation layout and
   action blocks (actuator ids, affine map and clip, delay in physics ticks), the
   OSL sensor terms (sensordata addresses, saturation, tare, bus lag, history),
-  the previous-command term, the failure threshold, the rebase interval and the
-  reset clip.
+  the previous-command term, the failure threshold, the rebase interval, the
+  reset clip, and the foot touch zones (`touch_sites`: the manifest's version
+  and boxes, which osl_deploy's Bundle checked against model.mjb, with their
+  site, sensor and body ids and sensordata addresses). SimCore does not read
+  `touch_sites`; tools/test/contract.test.mjs checks physics.mjb.gz against it,
+  because a touch sensor reads only contacts inside its zone and the zones are
+  the one thing that tells two bundles' models apart (R2's heel zone misses
+  the heel: r_foot reads 0 N there).
+  For the page's sensing and X-ray views (render/frame.js extras; SimCore
+  reads none of these): each OSL term's `channels` and `units` (the manifest's
+  term_layout) and each read's `anchor` (the site the sensor reads, or its
+  joint, with the body it moves with), `osl.sensor_set` (the manifest's), and
+  `socket` (the prosthesis socket body, its parent and tree root, the mass
+  below it, and whether MuJoCo refreshes cfrc_int in every mj_forward and
+  mj_step: the frames' socket wrench reads it).
 - `reference`: the gait-library configuration (blend, lookahead, twist metric,
   the command support of the WHOLE library) and the table of the clips the UI
   can reach ({name, index (library), twist, num_frames, stride, start, idle}),
@@ -37,6 +50,9 @@ clip after clip (row `start + frame`), and only the arrays SimCore reads:
     reset_joint_pos, reset_joint_vel float32 [77]  the reset frame's joints
 """
 
+import os
+from pathlib import Path
+
 import numpy as np
 
 from .common import load_bundle
@@ -47,6 +63,43 @@ REFERENCE_FORMAT = "duetmimic-reference/1"
 REFERENCE_FILE = "reference.bin.gz"
 RESET_CLIP, RESET_FRAME = "idle", 0
 FRAME_FIELDS = ("root_pos", "root_quat", "root_lin_vel", "root_ang_vel_w", "rpos")
+# The prosthesis socket body (the manifest names only its joints, robot/socket_*):
+# the OSL hangs from it, and its cfrc_int is the whole load between the residual
+# limb and the prosthesis (duet_export.trace records the same body).
+SOCKET_BODY = "robot/OSL_KA_L1_osl_generic_socket"
+WRENCH_CONVENTION = (
+    "frame.wrench (demo/js/render/frame.js) = [Fx, Fy, Fz, Tx, Ty, Tz], N and N m, MuJoCo world "
+    "axes: the load the prosthesis applies to the residual limb at this body's origin xpos[body]: "
+    "F = -cfrc_int[body][3:6], T = -(cfrc_int[body][0:3] + (subtree_com[root] - xpos[body]) x "
+    "cfrc_int[body][3:6]); cfrc_int[body] is the wrench the parent applies to the body's subtree, "
+    "[torque about subtree_com[root]; force]"
+)
+
+
+def write_container_atomic(path, arrays, meta=None):
+    """write_container through a temporary file and a rename: whoever reads the
+    asset meanwhile (the demo, a benchmark) gets the old file or the new one,
+    never a partial one."""
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        stats = write_container(tmp, arrays, meta)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return stats
+
+
+def load_bundle_once(bundle_dir, ctx):
+    """osl_deploy's Bundle for this export run, loaded once for every section that
+    needs it (sim, visual) and kept in the run's ctx."""
+    bundle = ctx.get("bundle") if ctx is not None else None
+    if bundle is None:
+        bundle = load_bundle(bundle_dir)
+        if ctx is not None:
+            ctx["bundle"] = bundle
+    return bundle
+
 
 # ---------------------------------------------------------------------------
 # WASD design. Twist (vx m/s, vy m/s, wz rad/s), wz > 0 turns left (CCW seen
@@ -61,20 +114,24 @@ FRAME_FIELDS = ("root_pos", "root_quat", "root_lin_vel", "root_ang_vel_w", "rpos
 # The values are decimal labels of library clips; ui_section() replaces each by
 # the clip's exact float32 label. The forward grid has +-0.5 rad/s arcs at every
 # speed (tighter ones exist only for 0.6-1.2 m/s); backward arcs stay gentle;
-# turning in place uses 1.0 rad/s both ways (this policy is weakest on tight
-# right turns, toward the prosthesis side, from about 1.2 rad/s).
+# turning in place uses 1.0 rad/s both ways (the R2 policy was weakest on
+# tight right turns, toward the prosthesis side, from about 1.2 rad/s).
 #
 # Capped for robustness at a 1.2 m/s top speed, -0.7 m/s backward and
 # +-0.25 rad/s backward arcs (the library goes to 1.5 / -0.8 / +-0.5). The caps
-# were first set for the int8 human weights; the closed-loop quantization study
-# (policy.py) later found int8 falls exactly as often as fp32, so the limit is
-# the policy itself: fp32 falls on 1 of 8 entry phases reversing from -0.8 to
-# 1.4 m/s, and walking forward out of a backward walk is the weakest transition
-# in the 2026-11-16 key-masher benchmark (demo/js/session.js holds it back
-# until the body is at rest). Restoring 1.4 / -0.8 / +-0.3 would make exactly
-# that transition harsher, so the caps stay.
-# Robustness: tools/duet_export/trace.py --robust (results in
-# tools/traces/r2_trace_robust*.json).
+# and the findings in this comment were measured on the R2 bundle
+# (stage2_R2_model_6898, 2026-11-16); the B bundle the demo now runs
+# (2026-11-18) reaches the same 27 clips with identical labels and has not been
+# re-measured. The caps were first set for the int8 human weights; the
+# closed-loop quantization study (policy.py) later found int8 falls exactly as
+# often as fp32, so the limit is the policy itself: fp32 falls on 1 of 8 entry
+# phases reversing from -0.8 to 1.4 m/s, and walking forward out of a backward
+# walk is the weakest transition in the 2026-11-16 key-masher benchmark
+# (demo/js/session.js holds it back until the body is at rest). Restoring
+# 1.4 / -0.8 / +-0.3 would make exactly that transition harsher, so the caps
+# stay.
+# Robustness: python -m duet_export.trace --robust [--seed N] (writes
+# tools/traces/trace_robust[_seedN].json).
 # ---------------------------------------------------------------------------
 UI_LEVELS = (
     # forward vx, forward arc |wz|, backward vx, backward arc |wz|, turn |wz|
@@ -262,7 +319,7 @@ def reference_section(bundle, reach, out_dir):
         "num_frames": [clip["num_frames"] for clip in clips],
         "frames": int(start),
     }
-    stats = write_container(out_dir / REFERENCE_FILE, data, meta)
+    stats = write_container_atomic(out_dir / REFERENCE_FILE, data, meta)
     reset_subset = next(i for i, clip in enumerate(clips) if clip["index"] == reset)
     section = {
         "format": REFERENCE_FORMAT,
@@ -287,6 +344,187 @@ def reference_section(bundle, reach, out_dir):
         "arrays": {key: list(value.shape) for key, value in data.items()},
     }
     return section, stats
+
+
+def touch_sites_section(bundle, touch_adr, osl_terms):
+    """The foot touch zones of model.mjb: the manifest's declaration (osl_deploy's
+    Bundle refused the bundle unless model.mjb matches it to 1e-9; a manifest
+    without `touch_sites` gets the "original" table, undeclared), with each
+    zone's site, sensor and body ids and sensordata address in the model.
+
+    Every touch sensor a policy reads (the human `touch` term, the OSL reads of
+    mjSENS_TOUCH sensors) must be one of these zones.
+    """
+    import mujoco
+
+    m, declared = bundle.model, bundle.touch_sites
+    obj = mujoco.mjtObj
+    sites = []
+    for site in declared.sites:
+        ids = {
+            "site_id": mujoco.mj_name2id(m, obj.mjOBJ_SITE, site.name),
+            "sensor_id": mujoco.mj_name2id(m, obj.mjOBJ_SENSOR, site.sensor),
+            "body_id": mujoco.mj_name2id(m, obj.mjOBJ_BODY, site.body),
+        }
+        if min(ids.values()) < 0:
+            raise ValueError(f"touch site {site.name}: missing from the model ({ids})")
+        sensor = ids["sensor_id"]
+        if (
+            m.sensor_type[sensor] != mujoco.mjtSensor.mjSENS_TOUCH
+            or m.sensor_objtype[sensor] != obj.mjOBJ_SITE
+            or m.sensor_objid[sensor] != ids["site_id"]
+            or m.site_bodyid[ids["site_id"]] != ids["body_id"]
+        ):
+            raise ValueError(f"touch site {site.name}: {site.sensor} is not its touch sensor")
+        sites.append(
+            {
+                "site": site.name,
+                "sensor": site.sensor,
+                "body": site.body,
+                **{key: int(value) for key, value in ids.items()},
+                "adr": int(m.sensor_adr[sensor]),
+                "type": site.type,
+                "pos": [float(x) for x in site.pos],
+                "quat": [float(x) for x in site.quat],
+                "size": [float(x) for x in site.size],
+            }
+        )
+    zones = {site["adr"] for site in sites}
+    touch_reads = [
+        read["adr"]
+        for term in osl_terms
+        for read in term["reads"]
+        if m.sensor_type[int(np.flatnonzero(m.sensor_adr == read["adr"])[0])]
+        == mujoco.mjtSensor.mjSENS_TOUCH
+    ]
+    stray = sorted((set(touch_adr) | set(touch_reads)) - zones)
+    if stray:
+        raise ValueError(f"touch reads at sensordata {stray} are not declared touch zones")
+    return {
+        "version": declared.version,
+        "declared": bool(declared.declared),
+        "frame": declared.frame,
+        "sites": sites,
+    }
+
+
+def sensor_anchor(model, sensor):
+    """Where an OSL sensor sits, for display: {kind: "site", id, body, name} for a
+    sensor of a site (IMU, load cell, touch zone), {kind: "joint", ...} for one of
+    a joint (an encoder; drawn at the joint's anchor, xanchor), with `body` the
+    body the site or joint moves with."""
+    import mujoco
+
+    obj = mujoco.mjtObj
+    objtype, objid = int(model.sensor_objtype[sensor]), int(model.sensor_objid[sensor])
+    if objtype == obj.mjOBJ_SITE:
+        kind, body = "site", int(model.site_bodyid[objid])
+    elif objtype == obj.mjOBJ_JOINT:
+        kind, body = "joint", int(model.jnt_bodyid[objid])
+    else:
+        name = mujoco.mj_id2name(model, obj.mjOBJ_SENSOR, sensor)
+        raise ValueError(f"OSL sensor {name} reads a {obj(objtype).name}, not a site or a joint")
+    return {"kind": kind, "id": objid, "body": body, "name": mujoco.mj_id2name(model, objtype, objid)}
+
+
+def osl_bus_terms(bundle, sensors=None):
+    """The OSL controller's bus terms (its sensor terms, in observation order) as
+    demo.json lists them under sim.osl.observation.terms: offset, frame size,
+    history and validation lag; the term's channel names and units (the
+    manifest's term_layout, one per frame value); per read (osl_deploy's
+    SensorRead) its sensordata slice, component selection, frame slot,
+    saturation and tare, and its display `anchor` (sensor_anchor). The frames'
+    `sensors` (render/frame.js) are these terms' frames, concatenated."""
+    import mujoco
+    from osl_deploy.sensor_observation import SensorObservation
+
+    spec = bundle.controller("osl")
+    if sensors is None:
+        sensors = SensorObservation(bundle, spec)  # default: validation lag, no noise
+    m = bundle.model
+    layout = {entry["name"]: entry for entry in spec.observation.get("term_layout", [])}
+    terms = []
+    for term in sensors.terms:
+        if not term.reads:
+            continue
+        entry = layout.get(term.name, {})
+        labels = {key: entry.get(key) for key in ("channels", "units")}
+        for key, values in labels.items():
+            if values is not None and len(values) != int(term.frame_dim):
+                raise ValueError(
+                    f"OSL term {term.name}: {len(values)} {key} for a frame of {term.frame_dim} values"
+                )
+        reads = []
+        for read in term.reads:
+            sensor = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SENSOR, read.scene_name)
+            if sensor < 0 or int(m.sensor_adr[sensor]) != int(read.data.start):
+                raise ValueError(f"OSL read {read.name}: sensor {read.scene_name} is not at sensordata {read.data.start}")
+            reads.append(
+                {
+                    "name": read.name,
+                    "adr": int(read.data.start),
+                    "size": int(read.size),
+                    "components": None if read.components is None else [int(i) for i in read.components],
+                    "frame": int(read.frame.start),
+                    "saturation": read.saturation,
+                    "tare": None if read.tare is None else [float(x) for x in read.tare],
+                    "anchor": sensor_anchor(m, sensor),
+                }
+            )
+        terms.append(
+            {
+                "name": term.name,
+                "offset": int(term.offset),
+                "frame_dim": int(term.frame_dim),
+                "history": int(term.history),
+                "lag": int(sensors.lags.get(term.name, 0)),
+                "channels": None if labels["channels"] is None else [str(c) for c in labels["channels"]],
+                "units": None if labels["units"] is None else [str(u) for u in labels["units"]],
+                "reads": reads,
+            }
+        )
+    return terms
+
+
+def cfrc_int_fresh(model):
+    """Whether MuJoCo recomputes every body's cfrc_int in each mj_forward and
+    mj_step of this model: mj_sensorAcc runs mj_rnePostConstraint for an
+    acceleration-stage sensor that needs it (force, torque, accelerometer), so
+    the browser can read cfrc_int at any frame without calling it (which after
+    an mj_step would use the integrated velocities)."""
+    import mujoco
+
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    for step in (mujoco.mj_forward, mujoco.mj_step):
+        data.cfrc_int[1:] = np.nan
+        step(model, data)
+        if not np.isfinite(data.cfrc_int[1:]).all():
+            return False
+    return True
+
+
+def socket_section(model):
+    """The prosthesis socket body: its id, parent (the residual femur) and kinematic
+    tree root (cfrc_int's torque reference point is that root's subtree_com), the
+    mass of its subtree (the whole prosthesis), whether cfrc_int is fresh in
+    every frame, and the frames' wrench convention (render/frame.js)."""
+    import mujoco
+
+    body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, SOCKET_BODY)
+    if body < 0:
+        raise ValueError(f"The bundle model has no body {SOCKET_BODY}")
+    parent = int(model.body_parentid[body])
+    return {
+        "body": int(body),
+        "name": SOCKET_BODY,
+        "parent": parent,
+        "parent_name": mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, parent),
+        "root": int(model.body_rootid[body]),
+        "subtree_mass": round(float(model.body_subtreemass[body]), 9),
+        "cfrc_int_fresh": cfrc_int_fresh(model),
+        "wrench": WRENCH_CONVENTION,
+    }
 
 
 def sim_section(bundle):
@@ -338,34 +576,7 @@ def sim_section(bundle):
     osl_spec = b.controller("osl")
     sensors = SensorObservation(b, osl_spec)  # default: validation lag, no noise
     span, history, width = previous_command(osl_spec)
-    terms = []
-    for term in sensors.terms:
-        if not term.reads:
-            continue
-        lag = int(sensors.lags.get(term.name, 0))
-        terms.append(
-            {
-                "name": term.name,
-                "offset": int(term.offset),
-                "frame_dim": int(term.frame_dim),
-                "history": int(term.history),
-                "lag": lag,
-                "reads": [
-                    {
-                        "name": read.name,
-                        "adr": int(read.data.start),
-                        "size": int(read.size),
-                        "components": None
-                        if read.components is None
-                        else [int(i) for i in read.components],
-                        "frame": int(read.frame.start),
-                        "saturation": read.saturation,
-                        "tare": None if read.tare is None else [float(x) for x in read.tare],
-                    }
-                    for read in term.reads
-                ],
-            }
-        )
+    terms = osl_bus_terms(b, sensors)
     # A reset holds position servos at the start pose (actuator_delay.hold_ctrl);
     # every other actuator (muscles, torque motors) holds 0. None here.
     servos = []
@@ -404,6 +615,8 @@ def sim_section(bundle):
         "muscle_ids": [int(i) for i in b.muscle_ids],
         "activation_ids": [int(i) for i in b.activation_ids],
         "touch_adr": [int(i) for i in b.touch_ids],
+        "touch_sites": touch_sites_section(b, [int(i) for i in b.touch_ids], terms),
+        "socket": socket_section(m),
         "human": {
             "observation": {
                 "schema": b.full_body.schema,
@@ -429,6 +642,8 @@ def sim_section(bundle):
                 },
             },
             "action": action("osl"),
+            # Which onboard sensors this bundle's OSL policy reads (the manifest's).
+            "sensor_set": osl_spec.observation.get("sensor_set"),
         },
         "hold_servos": servos,
         "failure_site_threshold": float(VALIDATION_SITE_THRESHOLD),
@@ -445,7 +660,7 @@ def sim_section(bundle):
 
 
 def export(bundle_dir, out_dir, ctx):
-    bundle = load_bundle(bundle_dir)
+    bundle = load_bundle_once(bundle_dir, ctx)
     twists = bundle.reference_arrays()["twists"]
     ui, reach = ui_section(twists)
     reference, stats = reference_section(bundle, reach, out_dir)

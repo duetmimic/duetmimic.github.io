@@ -1,8 +1,9 @@
 // The two controllers' inputs, ported from osl_deploy:
 // - HumanObservation: observations.FullBodyObservation (osl_mimic_gait_v1, 2338);
-// - OslObservation: sensor_observation.SensorObservation (osl_split_sensors_v1,
-//   600) at default settings: per-bus lag "validation", history, saturation,
-//   tare; no randomization, no noise;
+// - OslObservation: sensor_observation.SensorObservation (osl_split_sensors_v1:
+//   the sensor terms demo.json lists, 500 inputs with the previous-command
+//   history for bundle B) at default settings: per-bus lag "validation",
+//   history, saturation, tare; no randomization, no noise;
 // - PreviousCommand: policy.PreviousCommandPolicy's last_action history.
 // Each writes into a caller-owned Float32Array (the policy input) and
 // allocates nothing per call. `v` is SimCore's cache of MjData array views.
@@ -176,10 +177,45 @@ export class HumanObservation {
   }
 }
 
+// One OSL sensor term's reads (demo.json sim.osl.observation.terms[*].reads),
+// compiled for readSensorFrame: osl_deploy's SensorRead (sensordata address,
+// selected components, frame slot, saturation, tare).
+export function compileSensorReads(reads) {
+  return reads.map((r) => ({
+    adr: r.adr,
+    components: r.components ? Int32Array.from(r.components) : null,
+    dim: r.components ? r.components.length : r.size,
+    frame: r.frame,
+    saturation: r.saturation,
+    tare: r.tare ? Float64Array.from(r.tare) : null,
+  }));
+}
+
+// A sensor term's processed frame from the current sensordata, as osl_deploy's
+// SensorObservation.read at default settings: per read, its selected
+// components, clamped to +-saturation where one is declared (the IMU), minus
+// the tare where one is declared (the load cells); value c of a read goes to
+// out[base + read.frame + c]. The one implementation of that processing:
+// OslObservation builds the policy input with it and render/frame.js the
+// frames' `sensors`, so the display shows exactly what the OSL reads.
+// Allocation-free.
+export function readSensorFrame(reads, sensordata, out, base = 0) {
+  for (let i = 0; i < reads.length; i++) {
+    const r = reads[i];
+    for (let c = 0; c < r.dim; c++) {
+      let x = sensordata[r.adr + (r.components ? r.components[c] : c)];
+      if (r.saturation != null) x = Math.min(Math.max(x, -r.saturation), r.saturation);
+      if (r.tare) x -= r.tare[c];
+      out[base + r.frame + c] = x;
+    }
+  }
+}
+
 // The OSL's own sensors: each bus term stacks `history` frames, oldest first
 // (obs[offset + t * frame_dim + c]); with lag L its newest slot holds the frame
 // read L control steps ago. A frame is the term's MJCF sensors read at the
-// boundary, clamped to +-saturation (IMU) and minus the tare (load cells).
+// boundary, clamped to +-saturation (IMU) and minus the tare (load cells):
+// readSensorFrame.
 export class OslObservation {
   constructor(obsCfg) {
     this.size = obsCfg.size;
@@ -191,14 +227,7 @@ export class OslObservation {
         frameDim: t.frame_dim,
         history: t.history,
         lag: t.lag,
-        reads: t.reads.map((r) => ({
-          adr: r.adr,
-          components: r.components ? Int32Array.from(r.components) : null,
-          dim: r.components ? r.components.length : r.size,
-          frame: r.frame,
-          saturation: r.saturation,
-          tare: r.tare ? Float64Array.from(r.tare) : null,
-        })),
+        reads: compileSensorReads(t.reads),
         frameValues: new Float64Array(t.frame_dim),
         window: new Float64Array(window * t.frame_dim),
         rows: window,
@@ -208,20 +237,21 @@ export class OslObservation {
       const dim = t.reads.reduce((sum, r) => sum + r.dim, 0);
       if (dim !== t.frameDim) throw new Error(`OSL term ${t.name}: sensors add ${dim}, frame_dim ${t.frameDim}`);
     }
+    // The sensor terms and the previous-command history tile the input exactly.
+    const spans = this.terms.map((t) => [t.offset, t.offset + t.history * t.frameDim, t.name]);
+    const pc = obsCfg.previous_command;
+    if (pc) spans.push([pc.offset, pc.offset + pc.history * pc.width, 'previous_command']);
+    spans.sort((a, b) => a[0] - b[0]);
+    let end = 0;
+    for (const [start, stop, name] of spans) {
+      if (start !== end) throw new Error(`OSL observation: ${name} starts at ${start}, not ${end}`);
+      end = stop;
+    }
+    if (end !== this.size) throw new Error(`OSL observation: its terms cover ${end} inputs, not ${this.size}`);
   }
 
   _read(sensordata) {
-    for (const t of this.terms) {
-      const f = t.frameValues;
-      for (const r of t.reads) {
-        for (let c = 0; c < r.dim; c++) {
-          let x = sensordata[r.adr + (r.components ? r.components[c] : c)];
-          if (r.saturation !== null) x = Math.min(Math.max(x, -r.saturation), r.saturation);
-          if (r.tare) x -= r.tare[c];
-          f[r.frame + c] = x;
-        }
-      }
-    }
+    for (const t of this.terms) readSensorFrame(t.reads, sensordata, t.frameValues, 0);
   }
 
   // A new episode: every slot of every window holds the first frame.
